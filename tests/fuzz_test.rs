@@ -87,8 +87,11 @@ fn exhaustive_fuzz_diff_test() {
         sys_echo,
         &mut tested_count,
     );
-    
-    println!("Successfully fuzz-tested {} combinations against gecho", tested_count);
+
+    println!(
+        "Successfully fuzz-tested {} combinations against gecho",
+        tested_count
+    );
 }
 
 #[test]

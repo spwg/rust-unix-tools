@@ -2,6 +2,18 @@
 
 Rust implementations of Unix command-line utilities.
 
+## Layout
+
+Each command has a small binary wrapper in `src/bin/` and reusable
+implementation code in `src/tools/`:
+
+- `src/bin/echo.rs` -> `src/tools/echo.rs`
+- `src/bin/ls.rs` -> `src/tools/ls.rs`
+
+This keeps CLI process handling separate from command behavior, which lets the
+tests call each tool directly and makes it straightforward to add more
+utilities.
+
 ## `echo` Conformance Target
 
 The `echo` implementation targets GNU coreutils `echo` behavior as shipped by
@@ -42,3 +54,22 @@ Testing policy:
   the test is specifically checking this project's branded output.
 - New edge cases should be covered in both normal mode and `POSIXLY_CORRECT`
   mode when relevant.
+
+## `ls` Conformance Target
+
+The `ls` implementation targets GNU coreutils `ls` behavior documented by the
+GNU coreutils 9.9 man page. A downloaded reference copy from man7.org is stored
+at `tests/fixtures/gnu-ls-9.9-manpage.html`; tests assert this fixture is the GNU
+coreutils reference and mine option coverage from it.
+
+The current implementation focuses on deterministic non-terminal output and
+covers GNU option families for hidden entries, directory operands, indicators,
+sorting, recursive traversal, inode/block prefixes, long output, numeric IDs,
+human-readable sizes, symlink dereferencing, and documented help/version/error
+shapes.
+
+Coverage for the `ls` implementation is enforced with:
+
+```sh
+cargo tarpaulin --test ls_manpage_tests --ignore-tests --include-files src/tools/ls.rs --fail-under 100
+```

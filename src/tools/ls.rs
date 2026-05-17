@@ -116,6 +116,7 @@ impl Default for Options {
 
 struct Entry {
     display_name: OsString,
+    display_path: PathBuf,
     path: PathBuf,
     metadata: Metadata,
 }
@@ -376,14 +377,17 @@ fn list(
 
     for operand in operands {
         let path = resolve(cwd, &operand);
+        let display_path = PathBuf::from(&operand);
         match metadata_for(&path, options.dereference) {
             Ok(metadata) if metadata.is_dir() && !options.directory => dirs.push(Entry {
                 display_name: operand,
+                display_path,
                 path,
                 metadata,
             }),
             Ok(metadata) => files.push(Entry {
                 display_name: operand,
+                display_path,
                 path,
                 metadata,
             }),
@@ -437,12 +441,26 @@ fn list_dir(
     write_entries(&entries, options, stdout);
 
     if options.recursive {
+        let mut visited = std::collections::HashSet::new();
+        visited.insert((dir.metadata.dev(), dir.metadata.ino()));
+
         let mut pending = directory_entries(entries);
         pending.reverse();
 
         while let Some(child) = pending.pop() {
+            let dev_ino = (child.metadata.dev(), child.metadata.ino());
+            if !visited.insert(dev_ino) {
+                let _ = writeln!(
+                    stderr,
+                    "ls: directory '{}' is part of a loop",
+                    child.display_path.display()
+                );
+                exit_code = exit_code.max(1);
+                continue;
+            }
+
             let _ = writeln!(stdout);
-            let _ = writeln!(stdout, "{}:", child.path.display());
+            let _ = writeln!(stdout, "{}:", child.display_path.display());
 
             let Some(child_entries) = read_dir_entries(&child, options, stderr, &mut exit_code)
             else {
@@ -479,9 +497,15 @@ fn read_dir_entries(
                     continue;
                 }
                 let path = child.path();
+                let display_path = if dir.display_path == Path::new(".") {
+                    Path::new(".").join(&name)
+                } else {
+                    dir.display_path.join(&name)
+                };
                 match metadata_for(&path, options.dereference) {
                     Ok(metadata) => entries.push(Entry {
                         display_name: name,
+                        display_path,
                         path,
                         metadata,
                     }),
@@ -641,9 +665,15 @@ fn push_dot_entry(entries: &mut Vec<Entry>, dir: &Entry, name: &str) {
     } else {
         dir.path.parent().unwrap_or(&dir.path).to_path_buf()
     };
+    let display_path = if name == "." {
+        dir.display_path.clone()
+    } else {
+        dir.display_path.parent().unwrap_or(&dir.display_path).to_path_buf()
+    };
     if let Ok(metadata) = fs::symlink_metadata(&path) {
         entries.push(Entry {
             display_name: OsString::from(name),
+            display_path,
             path,
             metadata,
         });
@@ -797,8 +827,12 @@ fn entry_time(entry: &Entry, options: &Options) -> SystemTime {
 
 fn extension(name: &OsStr) -> &[u8] {
     let bytes = name.as_bytes();
-    match bytes.iter().rposition(|&byte| byte == b'.') {
-        Some(index) if index + 1 < bytes.len() => &bytes[index + 1..],
+    if bytes.is_empty() {
+        return b"";
+    }
+    let search_bytes = if bytes[0] == b'.' { &bytes[1..] } else { bytes };
+    match search_bytes.iter().rposition(|&byte| byte == b'.') {
+        Some(index) if index + 1 < search_bytes.len() => &search_bytes[index + 1..],
         _ => b"",
     }
 }

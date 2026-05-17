@@ -523,3 +523,41 @@ fn invalid_option_arguments_report_serious_trouble() {
     assert_eq!(f.run(&["--width"]).0, 2);
     assert_eq!(f.run(&["-?"]).0, 2);
 }
+
+#[test]
+fn test_dotfile_extension_sort() {
+    let f = Fixture::new("dotfile-extension");
+    f.file(".z_no_extension", b"");
+    f.file("a.txt", b"");
+    f.file(".bashrc", b"");
+
+    let output = f.run(&["-A", "--sort=extension"]).1;
+
+    assert_eq!(output, ".bashrc\n.z_no_extension\na.txt\n");
+}
+
+#[test]
+fn test_recursive_directory_loop_detected() {
+    let f = Fixture::new("recursive-loop");
+    f.dir("parent");
+    f.symlink("../parent", "parent/loop_link");
+
+    let (code, _, stderr) = f.run(&["-R", "-L", "parent"]);
+
+    assert_eq!(code, 1);
+    assert!(stderr.contains("is part of a loop"));
+}
+
+#[test]
+fn test_recursive_relative_headers() {
+    let f = Fixture::new("relative-headers");
+    f.dir("dir");
+    f.dir("dir/sub");
+    f.file("dir/sub/file", b"");
+
+    let stdout = f.run(&["-R", "dir"]).1;
+
+    assert!(stdout.contains("dir/sub:\nfile\n"));
+    assert!(!stdout.contains(&f.root.display().to_string()));
+}
+

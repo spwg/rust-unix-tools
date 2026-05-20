@@ -12,3 +12,7 @@ path = "src/bin/echo.rs"
 [[bin]]
 name = "ls"
 path = "src/bin/ls.rs"
+
+[[bin]]
+name = "cat"
+path = "src/bin/cat.rs"

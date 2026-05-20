@@ -282,6 +282,17 @@ fn process_reader(
     consecutive_empty_lines: &mut usize,
     line_number: &mut usize,
 ) -> io::Result<()> {
+    let is_simple_copy = !options.number
+        && !options.number_nonblank
+        && !options.squeeze_blank
+        && !options.show_ends
+        && !options.show_tabs
+        && !options.show_nonprinting;
+    if is_simple_copy {
+        io::copy(reader, writer)?;
+        return Ok(());
+    }
+
     let mut buf = [0; 4096];
     loop {
         let n = reader.read(&mut buf)?;

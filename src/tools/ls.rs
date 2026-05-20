@@ -5,11 +5,12 @@
 //! favors deterministic non-terminal output: one entry per line unless an
 //! explicit format option requests otherwise.
 
+use crate::getopt::{HasArg, OptSpec, ParsedArg};
 use std::cmp::Ordering;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, Metadata};
 use std::io::Write;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -176,188 +177,229 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+
+    let specs = [
+        // Help & Version
+        OptSpec { short: None, long: Some("help"), has_arg: HasArg::No },
+        OptSpec { short: None, long: Some("version"), has_arg: HasArg::No },
+
+        // Options with short & long mapping
+        OptSpec { short: Some('a'), long: Some("all"), has_arg: HasArg::No },
+        OptSpec { short: Some('A'), long: Some("almost-all"), has_arg: HasArg::No },
+        OptSpec { short: Some('B'), long: Some("ignore-backups"), has_arg: HasArg::No },
+        OptSpec { short: Some('d'), long: Some("directory"), has_arg: HasArg::No },
+        OptSpec { short: Some('R'), long: Some("recursive"), has_arg: HasArg::No },
+        OptSpec { short: Some('F'), long: Some("classify"), has_arg: HasArg::Optional },
+        OptSpec { short: Some('i'), long: Some("inode"), has_arg: HasArg::No },
+        OptSpec { short: Some('s'), long: Some("size"), has_arg: HasArg::No },
+        OptSpec { short: Some('h'), long: Some("human-readable"), has_arg: HasArg::No },
+        OptSpec { short: Some('k'), long: Some("kibibytes"), has_arg: HasArg::No },
+        OptSpec { short: Some('n'), long: Some("numeric-uid-gid"), has_arg: HasArg::No },
+        OptSpec { short: Some('L'), long: Some("dereference"), has_arg: HasArg::No },
+
+        // Short options without long counterparts
+        OptSpec { short: Some('c'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('C'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('x'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('f'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('U'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('g'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('G'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('H'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('l'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('m'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('N'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('q'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('Q'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('w'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('Z'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('o'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('p'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('r'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('S'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('t'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('u'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('v'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('X'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('1'), long: None, has_arg: HasArg::No },
+        OptSpec { short: Some('-'), long: None, has_arg: HasArg::No },
+
+        // Long options without short counterparts (that have logic)
+        OptSpec { short: None, long: Some("group-directories-first"), has_arg: HasArg::No },
+        OptSpec { short: None, long: Some("no-group"), has_arg: HasArg::No },
+        OptSpec { short: None, long: Some("color"), has_arg: HasArg::Optional },
+        OptSpec { short: None, long: Some("hyperlink"), has_arg: HasArg::Optional },
+        OptSpec { short: None, long: Some("file-type"), has_arg: HasArg::No },
+        OptSpec { short: None, long: Some("indicator-style"), has_arg: HasArg::Yes },
+        OptSpec { short: None, long: Some("format"), has_arg: HasArg::Yes },
+        OptSpec { short: None, long: Some("sort"), has_arg: HasArg::Yes },
+        OptSpec { short: None, long: Some("time"), has_arg: HasArg::Yes },
+        OptSpec { short: None, long: Some("block-size"), has_arg: HasArg::Yes },
+        OptSpec { short: None, long: Some("si"), has_arg: HasArg::No },
+        OptSpec { short: None, long: Some("zero"), has_arg: HasArg::No },
+
+        // Long options without logic (no-op or consume and discard)
+        OptSpec { short: None, long: Some("author"), has_arg: HasArg::Optional },
+        OptSpec { short: None, long: Some("dired"), has_arg: HasArg::Optional },
+        OptSpec { short: None, long: Some("full-time"), has_arg: HasArg::Optional },
+        OptSpec { short: None, long: Some("hide"), has_arg: HasArg::Yes },
+        OptSpec { short: None, long: Some("ignore"), has_arg: HasArg::Yes },
+        OptSpec { short: None, long: Some("literal"), has_arg: HasArg::Optional },
+        OptSpec { short: None, long: Some("quote-name"), has_arg: HasArg::Optional },
+        OptSpec { short: None, long: Some("quoting-style"), has_arg: HasArg::Yes },
+        OptSpec { short: None, long: Some("show-control-chars"), has_arg: HasArg::Optional },
+        OptSpec { short: None, long: Some("tabsize"), has_arg: HasArg::Yes },
+        OptSpec { short: None, long: Some("width"), has_arg: HasArg::Yes },
+        OptSpec { short: None, long: Some("context"), has_arg: HasArg::Optional },
+        OptSpec { short: None, long: Some("dereference-command-line"), has_arg: HasArg::Optional },
+        OptSpec { short: None, long: Some("dereference-command-line-symlink-to-dir"), has_arg: HasArg::Optional },
+    ];
+
+    let posixly_correct = std::env::var_os("POSIXLY_CORRECT").is_some();
+    let parsed_args = crate::getopt::parse(&args, &specs, posixly_correct)?;
+
     let mut options = Options::default();
     let mut operands = Vec::new();
-    let mut parsing_options = true;
-    let mut iter = args.into_iter().map(Into::into).peekable();
+    let mut help = false;
+    let mut version = false;
 
-    while let Some(arg) = iter.next() {
-        let bytes = arg.as_bytes();
-        if !parsing_options || bytes == b"-" || !bytes.starts_with(b"-") {
-            operands.push(arg);
-            parsing_options = false;
-            continue;
-        }
-        if bytes == b"--" {
-            parsing_options = false;
-            continue;
-        }
-        if bytes == b"--help" {
-            return Ok(ParseResult {
-                options,
-                operands,
-                help: true,
-                version: false,
-            });
-        }
-        if bytes == b"--version" {
-            return Ok(ParseResult {
-                options,
-                operands,
-                help: false,
-                version: true,
-            });
-        }
-        if bytes.starts_with(b"--") {
-            parse_long(bytes, &mut iter, &mut options)?;
-        } else {
-            parse_short(bytes, &mut iter, &mut options)?;
+    for parsed_arg in parsed_args {
+        match parsed_arg {
+            ParsedArg::Option { short, long, value } => {
+                if let Some(l) = long {
+                    match l {
+                        "help" => help = true,
+                        "version" => version = true,
+                        "all" => options.all = true,
+                        "almost-all" => options.almost_all = true,
+                        "ignore-backups" => options.ignore_backups = true,
+                        "directory" => options.directory = true,
+                        "recursive" => options.recursive = true,
+                        "group-directories-first" => options.group_dirs_first = true,
+                        "inode" => options.inode = true,
+                        "size" => options.size = true,
+                        "human-readable" => options.human_readable = true,
+                        "kibibytes" => options.block_size = 1024,
+                        "numeric-uid-gid" => {
+                            options.numeric = true;
+                            options.format = Format::Long;
+                        }
+                        "no-group" => options.omit_group = true,
+                        "dereference" => options.dereference = true,
+                        "color" | "hyperlink" => {}
+                        "classify" => {
+                            if value.map(|v| v.as_bytes()) != Some(b"never") {
+                                options.indicator = Indicator::Classify;
+                            }
+                        }
+                        "file-type" => options.indicator = Indicator::FileType,
+                        "indicator-style" => {
+                            let val = value.ok_or_else(|| "option '--indicator-style' requires an argument".to_string())?;
+                            match val.as_bytes() {
+                                b"none" => options.indicator = Indicator::None,
+                                b"slash" => options.indicator = Indicator::Slash,
+                                b"file-type" => options.indicator = Indicator::FileType,
+                                b"classify" => options.indicator = Indicator::Classify,
+                                _ => return Err(format!("invalid indicator style: {}", os_lossy(val))),
+                            }
+                        }
+                        "format" => {
+                            let val = value.ok_or_else(|| "option '--format' requires an argument".to_string())?;
+                            match val.as_bytes() {
+                                b"single-column" => options.format = Format::One,
+                                b"long" | b"verbose" => options.format = Format::Long,
+                                b"commas" => options.format = Format::Commas,
+                                b"vertical" | b"across" | b"horizontal" => options.format = Format::Columns,
+                                other => return Err(format!("invalid format: {}", bytes_lossy(other))),
+                            }
+                        }
+                        "sort" => {
+                            let val = value.ok_or_else(|| "option '--sort' requires an argument".to_string())?;
+                            set_sort(val, &mut options)?;
+                        }
+                        "time" => {
+                            let val = value.ok_or_else(|| "option '--time' requires an argument".to_string())?;
+                            set_time(val, &mut options)?;
+                        }
+                        "block-size" => {
+                            let val = value.ok_or_else(|| "option '--block-size' requires an argument".to_string())?;
+                            set_block_size(val, &mut options)?;
+                        }
+                        "si" => options.block_size = 1000,
+                        "zero" => options.format = Format::One,
+                        // No-op or consume-only options
+                        "author" | "dired" | "full-time" | "hide" | "ignore" | "literal"
+                        | "quote-name" | "quoting-style" | "show-control-chars" | "tabsize"
+                        | "width" | "context" | "dereference-command-line"
+                        | "dereference-command-line-symlink-to-dir" => {}
+                        _ => return Err(format!("unrecognized option '--{}'", l)),
+                    }
+                } else if let Some(s) = short {
+                    match s {
+                        'a' => options.all = true,
+                        'A' => options.almost_all = true,
+                        'B' => options.ignore_backups = true,
+                        'c' => options.time = TimeField::Changed,
+                        'C' | 'x' => options.format = Format::Columns,
+                        'd' => options.directory = true,
+                        'f' | 'U' => {
+                            options.all = true;
+                            options.sort = Sort::None;
+                        }
+                        'F' => {
+                            if value.map(|v| v.as_bytes()) != Some(b"never") {
+                                options.indicator = Indicator::Classify;
+                            }
+                        }
+                        'g' => {
+                            options.format = Format::Long;
+                            options.omit_owner = true;
+                        }
+                        'G' => options.omit_group = true,
+                        'h' => options.human_readable = true,
+                        'H' => {}
+                        'i' => options.inode = true,
+                        'k' => options.block_size = 1024,
+                        'l' => options.format = Format::Long,
+                        'L' => options.dereference = true,
+                        'm' => options.format = Format::Commas,
+                        'n' => {
+                            options.numeric = true;
+                            options.format = Format::Long;
+                        }
+                        'N' | 'q' | 'Q' | 'w' | 'Z' => {}
+                        'o' => {
+                            options.format = Format::Long;
+                            options.omit_group = true;
+                        }
+                        'p' => options.indicator = Indicator::Slash,
+                        'r' => options.reverse = true,
+                        'R' => options.recursive = true,
+                        's' => options.size = true,
+                        'S' => options.sort = Sort::Size,
+                        't' => options.sort = Sort::Time,
+                        'u' => options.time = TimeField::Accessed,
+                        'v' => options.sort = Sort::Name,
+                        'X' => options.sort = Sort::Extension,
+                        '1' => options.format = Format::One,
+                        '-' => return Err("use '--' to end option parsing".to_string()),
+                        _ => return Err(format!("invalid option -- '{}'", s)),
+                    }
+                }
+            }
+            ParsedArg::Operand(op) => {
+                operands.push(OsString::from(op));
+            }
         }
     }
 
     Ok(ParseResult {
         options,
         operands,
-        help: false,
-        version: false,
+        help,
+        version,
     })
-}
-
-fn parse_long<I>(
-    bytes: &[u8],
-    iter: &mut std::iter::Peekable<I>,
-    options: &mut Options,
-) -> Result<(), String>
-where
-    I: Iterator<Item = OsString>,
-{
-    let (name, inline_value) = split_long(bytes);
-    match name {
-        b"--all" => options.all = true,
-        b"--almost-all" => options.almost_all = true,
-        b"--ignore-backups" => options.ignore_backups = true,
-        b"--directory" => options.directory = true,
-        b"--recursive" => options.recursive = true,
-        b"--group-directories-first" => options.group_dirs_first = true,
-        b"--inode" => options.inode = true,
-        b"--size" => options.size = true,
-        b"--human-readable" => options.human_readable = true,
-        b"--kibibytes" => options.block_size = 1024,
-        b"--numeric-uid-gid" => {
-            options.numeric = true;
-            options.format = Format::Long;
-        }
-        b"--no-group" => options.omit_group = true,
-        b"--dereference" => options.dereference = true,
-        b"--color" | b"--hyperlink" => {
-            let _ = optional_value(inline_value);
-        }
-        b"--classify" => {
-            let value = optional_value(inline_value);
-            if value != Some(b"never") {
-                options.indicator = Indicator::Classify;
-            }
-        }
-        b"--file-type" => options.indicator = Indicator::FileType,
-        b"--indicator-style" => match required_value(name, inline_value, iter)? {
-            v if v.as_bytes() == b"none" => options.indicator = Indicator::None,
-            v if v.as_bytes() == b"slash" => options.indicator = Indicator::Slash,
-            v if v.as_bytes() == b"file-type" => options.indicator = Indicator::FileType,
-            v if v.as_bytes() == b"classify" => options.indicator = Indicator::Classify,
-            v => return Err(format!("invalid indicator style: {}", os_lossy(&v))),
-        },
-        b"--format" => match required_value(name, inline_value, iter)?.as_bytes() {
-            b"single-column" => options.format = Format::One,
-            b"long" | b"verbose" => options.format = Format::Long,
-            b"commas" => options.format = Format::Commas,
-            b"vertical" => options.format = Format::Columns,
-            b"across" | b"horizontal" => options.format = Format::Columns,
-            other => return Err(format!("invalid format: {}", bytes_lossy(other))),
-        },
-        b"--sort" => set_sort(&required_value(name, inline_value, iter)?, options)?,
-        b"--time" => set_time(&required_value(name, inline_value, iter)?, options)?,
-        b"--block-size" => set_block_size(&required_value(name, inline_value, iter)?, options)?,
-        b"--si" => options.block_size = 1000,
-        b"--zero" => options.format = Format::One,
-        b"--author"
-        | b"--dired"
-        | b"--full-time"
-        | b"--hide"
-        | b"--ignore"
-        | b"--literal"
-        | b"--quote-name"
-        | b"--quoting-style"
-        | b"--show-control-chars"
-        | b"--tabsize"
-        | b"--width"
-        | b"--context"
-        | b"--dereference-command-line"
-        | b"--dereference-command-line-symlink-to-dir" => {
-            consume_known_long_value(name, inline_value, iter)?;
-        }
-        _ => return Err(format!("unrecognized option '{}'", bytes_lossy(bytes))),
-    }
-    Ok(())
-}
-
-fn parse_short<I>(
-    bytes: &[u8],
-    iter: &mut std::iter::Peekable<I>,
-    options: &mut Options,
-) -> Result<(), String>
-where
-    I: Iterator<Item = OsString>,
-{
-    for &byte in &bytes[1..] {
-        match byte {
-            b'a' => options.all = true,
-            b'A' => options.almost_all = true,
-            b'B' => options.ignore_backups = true,
-            b'c' => options.time = TimeField::Changed,
-            b'C' | b'x' => options.format = Format::Columns,
-            b'd' => options.directory = true,
-            b'f' | b'U' => {
-                options.all = true;
-                options.sort = Sort::None;
-            }
-            b'F' => options.indicator = Indicator::Classify,
-            b'g' => {
-                options.format = Format::Long;
-                options.omit_owner = true;
-            }
-            b'G' => options.omit_group = true,
-            b'h' => options.human_readable = true,
-            b'H' => {}
-            b'i' => options.inode = true,
-            b'k' => options.block_size = 1024,
-            b'l' => options.format = Format::Long,
-            b'L' => options.dereference = true,
-            b'm' => options.format = Format::Commas,
-            b'n' => {
-                options.numeric = true;
-                options.format = Format::Long;
-            }
-            b'N' | b'q' | b'Q' | b'w' | b'Z' => {}
-            b'o' => {
-                options.format = Format::Long;
-                options.omit_group = true;
-            }
-            b'p' => options.indicator = Indicator::Slash,
-            b'r' => options.reverse = true,
-            b'R' => options.recursive = true,
-            b's' => options.size = true,
-            b'S' => options.sort = Sort::Size,
-            b't' => options.sort = Sort::Time,
-            b'u' => options.time = TimeField::Accessed,
-            b'v' => options.sort = Sort::Name,
-            b'X' => options.sort = Sort::Extension,
-            b'1' => options.format = Format::One,
-            b'-' => return Err("use '--' to end option parsing".to_string()),
-            other => return Err(format!("invalid option -- '{}'", other as char)),
-        }
-    }
-    let _ = iter;
-    Ok(())
 }
 
 fn list(
@@ -841,51 +883,7 @@ fn compare_os(left: &OsStr, right: &OsStr) -> Ordering {
     left.as_bytes().cmp(right.as_bytes())
 }
 
-fn split_long(bytes: &[u8]) -> (&[u8], Option<&[u8]>) {
-    match bytes.iter().position(|&byte| byte == b'=') {
-        Some(index) => (&bytes[..index], Some(&bytes[index + 1..])),
-        None => (bytes, None),
-    }
-}
 
-fn optional_value(value: Option<&[u8]>) -> Option<&[u8]> {
-    value
-}
-
-fn required_value<I>(
-    name: &[u8],
-    inline: Option<&[u8]>,
-    iter: &mut std::iter::Peekable<I>,
-) -> Result<OsString, String>
-where
-    I: Iterator<Item = OsString>,
-{
-    if let Some(value) = inline {
-        Ok(OsString::from_vec(value.to_vec()))
-    } else {
-        iter.next()
-            .ok_or_else(|| format!("option '{}' requires an argument", bytes_lossy(name)))
-    }
-}
-
-fn consume_known_long_value<I>(
-    name: &[u8],
-    inline: Option<&[u8]>,
-    iter: &mut std::iter::Peekable<I>,
-) -> Result<(), String>
-where
-    I: Iterator<Item = OsString>,
-{
-    match name {
-        b"--hide" | b"--ignore" | b"--quoting-style" | b"--tabsize" | b"--width" => {
-            let _ = required_value(name, inline, iter)?;
-        }
-        _ => {
-            let _ = optional_value(inline);
-        }
-    }
-    Ok(())
-}
 
 fn set_sort(value: &OsStr, options: &mut Options) -> Result<(), String> {
     match value.as_bytes() {

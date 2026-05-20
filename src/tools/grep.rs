@@ -6,7 +6,7 @@
 //! 
 //! [grep.rs](file:///Users/spencergreene/github/rust-unix-tools/src/tools/grep.rs)
 
-use regex::{Regex, RegexBuilder};
+use regex::{Regex, RegexBuilder, RegexSet};
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -424,6 +424,7 @@ fn search_recursive(
     follow_symlinks: bool,
     options: &GrepOptions,
     compiled_regexes: &[Regex],
+    regex_set: Option<&RegexSet>,
     raw_patterns: &[String],
     stdout: &mut impl Write,
     stderr: &mut impl Write,
@@ -479,6 +480,7 @@ fn search_recursive(
                 follow_symlinks,
                 options,
                 compiled_regexes,
+                regex_set,
                 raw_patterns,
                 stdout,
                 stderr,
@@ -494,6 +496,7 @@ fn search_recursive(
                 &filename_to_print,
                 options,
                 compiled_regexes,
+                regex_set,
                 raw_patterns,
                 stdout,
                 stderr,
@@ -511,6 +514,7 @@ fn search_file(
     filename_to_print: &str,
     options: &GrepOptions,
     compiled_regexes: &[Regex],
+    regex_set: Option<&RegexSet>,
     raw_patterns: &[String],
     stdout: &mut impl Write,
     stderr: &mut impl Write,
@@ -525,6 +529,7 @@ fn search_file(
                 filename_to_print,
                 options,
                 compiled_regexes,
+                regex_set,
                 stdout,
                 raw_patterns,
             );
@@ -636,6 +641,7 @@ fn search_reader(
     filename: &str,
     options: &GrepOptions,
     compiled_regexes: &[Regex],
+    regex_set: Option<&RegexSet>,
     stdout: &mut impl Write,
     raw_patterns: &[String],
 ) -> io::Result<bool> {
@@ -668,7 +674,12 @@ fn search_reader(
             &line[..]
         };
 
-        let (matched, mut matches) = match_line(trimmed_line, compiled_regexes, raw_patterns, options);
+        let (matched, mut matches) = if let Some(ref set) = regex_set {
+            let is_match = set.is_match(trimmed_line);
+            (if options.invert_match { !is_match } else { is_match }, Vec::new())
+        } else {
+            match_line(trimmed_line, compiled_regexes, raw_patterns, options)
+        };
 
         if matched {
             file_matched = true;
@@ -735,6 +746,7 @@ fn process_file_arg(
     num_files: usize,
     options: &GrepOptions,
     compiled_regexes: &[Regex],
+    regex_set: Option<&RegexSet>,
     final_patterns: &[String],
     stdout: &mut impl Write,
     stderr: &mut impl Write,
@@ -758,6 +770,7 @@ fn process_file_arg(
             &display_name,
             options,
             compiled_regexes,
+            regex_set,
             stdout,
             final_patterns,
         );
@@ -808,6 +821,7 @@ fn process_file_arg(
                     follow,
                     options,
                     compiled_regexes,
+                    regex_set,
                     final_patterns,
                     stdout,
                     stderr,
@@ -836,6 +850,7 @@ fn process_file_arg(
                 &filename_to_print,
                 options,
                 compiled_regexes,
+                regex_set,
                 final_patterns,
                 stdout,
                 stderr,
@@ -895,6 +910,16 @@ where
         }
     };
 
+    let regex_set = if compiled_regexes.len() > 1 && !options.only_matching && !options.word_regexp {
+        let patterns_strs: Vec<&str> = compiled_regexes.iter().map(|re| re.as_str()).collect();
+        regex::RegexSetBuilder::new(&patterns_strs)
+            .case_insensitive(options.ignore_case)
+            .build()
+            .ok()
+    } else {
+        None
+    };
+
     if files.is_empty() {
         files.push(OsString::from("-"));
     }
@@ -911,6 +936,7 @@ where
             num_files,
             &options,
             &compiled_regexes,
+            regex_set.as_ref(),
             &final_patterns,
             stdout,
             stderr,
@@ -1294,6 +1320,7 @@ mod tests {
             "prefix",
             &options,
             &[],
+            None,
             &[],
             &mut stdout,
             &mut stderr,
@@ -1338,6 +1365,7 @@ mod tests {
             false,
             &options,
             &[],
+            None,
             &[],
             &mut stdout,
             &mut stderr,
@@ -1366,6 +1394,7 @@ mod tests {
             "filename",
             &options,
             &[],
+            None,
             &mut stdout,
             &[],
         );
@@ -1384,6 +1413,7 @@ mod tests {
             "file.txt",
             &options,
             &regexes,
+            None,
             &mut stdout,
             &raw,
         ).unwrap();
@@ -1403,6 +1433,7 @@ mod tests {
             "",
             &options,
             &regexes,
+            None,
             &mut stdout,
             &raw,
         ).unwrap();
@@ -1423,6 +1454,7 @@ mod tests {
             "file.txt",
             &options,
             &regexes,
+            None,
             &mut stdout,
             &raw,
         ).unwrap();
@@ -1443,6 +1475,7 @@ mod tests {
             "file.txt",
             &options,
             &regexes,
+            None,
             &mut stdout,
             &raw,
         ).unwrap();
@@ -1462,6 +1495,7 @@ mod tests {
             "file.txt",
             &options,
             &regexes,
+            None,
             &mut stdout,
             &raw,
         ).unwrap();
@@ -1481,6 +1515,7 @@ mod tests {
             "file.txt",
             &options,
             &regexes,
+            None,
             &mut stdout,
             &raw,
         ).unwrap();
@@ -1513,6 +1548,7 @@ mod tests {
             1,
             &options,
             &regexes,
+            None,
             &raw,
             &mut stdout,
             &mut stderr,

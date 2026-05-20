@@ -9,6 +9,8 @@
 //! - Option terminator (`--`).
 //! - GNU-style argument permutation (intermixed options and operands)
 //!   which can be disabled via a `posixly_correct` flag.
+//! 
+//! [getopt.rs](file:///Users/spencergreene/github/rust-unix-tools/src/getopt.rs)
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -268,6 +270,105 @@ mod tests {
                 ParsedArg::Operand(OsStr::new("1024")),
             ]
         );
+    }
+
+    #[test]
+    fn test_getopt_attached_and_extra() {
+        let specs = vec![
+            OptSpec { short: Some('a'), long: Some("all"), has_arg: HasArg::No },
+            OptSpec { short: Some('b'), long: Some("block-size"), has_arg: HasArg::Yes },
+            OptSpec { short: Some('c'), long: Some("classify"), has_arg: HasArg::Optional },
+        ];
+
+        // 1. Attached required option arguments (-b1024)
+        let args1 = vec!["-b1024".into()];
+        let res1 = parse(&args1, &specs, false).unwrap();
+        assert_eq!(
+            res1,
+            vec![ParsedArg::Option { short: Some('b'), long: Some("block-size"), value: Some(OsStr::new("1024")) }]
+        );
+
+        // 2. Attached optional option arguments (-cval)
+        let args2 = vec!["-cval".into()];
+        let res2 = parse(&args2, &specs, false).unwrap();
+        assert_eq!(
+            res2,
+            vec![ParsedArg::Option { short: Some('c'), long: Some("classify"), value: Some(OsStr::new("val")) }]
+        );
+
+        // 3. Option terminator --
+        let args3 = vec!["-a".into(), "--".into(), "-b".into(), "1024".into()];
+        let res3 = parse(&args3, &specs, false).unwrap();
+        assert_eq!(
+            res3,
+            vec![
+                ParsedArg::Option { short: Some('a'), long: Some("all"), value: None },
+                ParsedArg::Operand(OsStr::new("-b")),
+                ParsedArg::Operand(OsStr::new("1024")),
+            ]
+        );
+
+        // 4. Operand "-"
+        let args4 = vec!["-".into(), "-a".into()];
+        let res4 = parse(&args4, &specs, false).unwrap();
+        assert_eq!(
+            res4,
+            vec![
+                ParsedArg::Option { short: Some('a'), long: Some("all"), value: None },
+                ParsedArg::Operand(OsStr::new("-")),
+            ]
+        );
+
+        // 5. Long option optional argument (no value provided)
+        let args5 = vec!["--classify".into()];
+        let res5 = parse(&args5, &specs, false).unwrap();
+        assert_eq!(
+            res5,
+            vec![ParsedArg::Option { short: Some('c'), long: Some("classify"), value: None }]
+        );
+
+        // 6. Long option required argument (inline value provided via =)
+        let args6 = vec!["--block-size=512".into()];
+        let res6 = parse(&args6, &specs, false).unwrap();
+        assert_eq!(
+            res6,
+            vec![ParsedArg::Option { short: Some('b'), long: Some("block-size"), value: Some(OsStr::new("512")) }]
+        );
+
+        // 7. Grouping of options
+        let args7 = vec!["-acval".into()];
+        let res7 = parse(&args7, &specs, false).unwrap();
+        assert_eq!(
+            res7,
+            vec![
+                ParsedArg::Option { short: Some('a'), long: Some("all"), value: None },
+                ParsedArg::Option { short: Some('c'), long: Some("classify"), value: Some(OsStr::new("val")) },
+            ]
+        );
+
+        let args8 = vec!["-ab512".into()];
+        let res8 = parse(&args8, &specs, false).unwrap();
+        assert_eq!(
+            res8,
+            vec![
+                ParsedArg::Option { short: Some('a'), long: Some("all"), value: None },
+                ParsedArg::Option { short: Some('b'), long: Some("block-size"), value: Some(OsStr::new("512")) },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_invalid_utf8_long_option() {
+        use std::os::unix::ffi::OsStringExt;
+        let specs = vec![
+            OptSpec { short: Some('a'), long: Some("all"), has_arg: HasArg::No },
+        ];
+        // Create an invalid UTF-8 long option `--\xff`
+        let invalid_arg = OsString::from_vec(vec![b'-', b'-', 0xff]);
+        let args = vec![invalid_arg];
+        let res = parse(&args, &specs, false);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("unrecognized option"));
     }
 
     #[test]

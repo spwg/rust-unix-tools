@@ -2,6 +2,8 @@
 //!
 //! This module implements the core logic of the `find` command, including
 //! a recursive descent parser for expressions and directory traversal.
+//! 
+//! [find.rs](file:///Users/spencergreene/github/rust-unix-tools/src/tools/find.rs)
 
 use regex::{Regex, RegexBuilder};
 use std::collections::HashSet;
@@ -561,16 +563,28 @@ fn compile_glob(glob: &str, case_insensitive: bool) -> Result<Regex, String> {
     let mut regex = String::new();
     regex.push_str("^(?:");
     let mut chars = glob.chars().peekable();
+    let mut in_char_class = false;
     while let Some(c) = chars.next() {
         match c {
-            '*' => regex.push_str(".*"),
-            '?' => regex.push('.'),
-            '[' => {
+            '*' if !in_char_class => regex.push_str(".*"),
+            '?' if !in_char_class => regex.push('.'),
+            '[' if !in_char_class => {
+                in_char_class = true;
                 regex.push('[');
                 if chars.peek() == Some(&'!') {
                     regex.push('^');
                     chars.next();
                 }
+            }
+            ']' if in_char_class => {
+                in_char_class = false;
+                regex.push(']');
+            }
+            c if in_char_class => {
+                if c == '\\' || c == '-' || c == '^' || c == '[' {
+                    regex.push('\\');
+                }
+                regex.push(c);
             }
             c if c.is_alphanumeric() => regex.push(c),
             c => {
@@ -892,5 +906,620 @@ fn traverse(
         if !has_action && matched {
             let _ = writeln!(stdout, "{}", display_path.to_string_lossy());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    struct FindTempFixture {
+        root: PathBuf,
+    }
+
+    impl FindTempFixture {
+        fn new(name: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("find-test-{}-{}-{}", name, std::process::id(), nanos));
+            fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+
+        fn file(&self, name: &str, size: usize) -> PathBuf {
+            let p = self.root.join(name);
+            let content = vec![0u8; size];
+            fs::write(&p, content).unwrap();
+            p
+        }
+
+        fn dir(&self, name: &str) -> PathBuf {
+            let p = self.root.join(name);
+            fs::create_dir_all(&p).unwrap();
+            p
+        }
+
+        fn symlink(&self, target: &str, link_name: &str) -> PathBuf {
+            let p = self.root.join(link_name);
+            let _ = fs::remove_file(&p);
+            std::os::unix::fs::symlink(target, &p).unwrap();
+            p
+        }
+    }
+
+    impl Drop for FindTempFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn test_has_action() {
+        assert!(ExprNode::Print.has_action());
+        assert!(ExprNode::Print0.has_action());
+        assert!(ExprNode::Delete.has_action());
+        assert!(ExprNode::Exec { command: vec![] }.has_action());
+        assert!(!ExprNode::TrueNode.has_action());
+
+        let and_act = ExprNode::And(vec![ExprNode::TrueNode, ExprNode::Print]);
+        assert!(and_act.has_action());
+
+        let and_no_act = ExprNode::And(vec![ExprNode::TrueNode, ExprNode::TrueNode]);
+        assert!(!and_no_act.has_action());
+
+        let or_act = ExprNode::Or(vec![ExprNode::Print, ExprNode::TrueNode]);
+        assert!(or_act.has_action());
+
+        let not_act = ExprNode::Not(Box::new(ExprNode::Print));
+        assert!(not_act.has_action());
+
+        let comma_act = ExprNode::Comma(vec![ExprNode::TrueNode, ExprNode::Print]);
+        assert!(comma_act.has_action());
+    }
+
+    #[test]
+    fn test_evaluate_operators() {
+        let fix = FindTempFixture::new("operators");
+        let f_path = fix.file("a.txt", 10);
+        let meta = fs::metadata(&f_path).unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut state = EvalState {
+            path: &f_path,
+            display_path: &f_path,
+            metadata: &meta,
+            pruned: false,
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+            cwd: &fix.root,
+        };
+
+        // TrueNode
+        assert!(ExprNode::TrueNode.eval(&mut state));
+
+        // Not operator
+        let not_node = ExprNode::Not(Box::new(ExprNode::TrueNode));
+        assert!(!not_node.eval(&mut state));
+
+        // And operator
+        let and_node = ExprNode::And(vec![ExprNode::TrueNode, ExprNode::TrueNode]);
+        assert!(and_node.eval(&mut state));
+        let and_node_false = ExprNode::And(vec![ExprNode::TrueNode, ExprNode::Not(Box::new(ExprNode::TrueNode))]);
+        assert!(!and_node_false.eval(&mut state));
+
+        // Or operator
+        let or_node = ExprNode::Or(vec![ExprNode::Not(Box::new(ExprNode::TrueNode)), ExprNode::TrueNode]);
+        assert!(or_node.eval(&mut state));
+        let or_node_false = ExprNode::Or(vec![ExprNode::Not(Box::new(ExprNode::TrueNode)), ExprNode::Not(Box::new(ExprNode::TrueNode))]);
+        assert!(!or_node_false.eval(&mut state));
+
+        // Comma operator
+        let comma_node = ExprNode::Comma(vec![ExprNode::TrueNode, ExprNode::Not(Box::new(ExprNode::TrueNode))]);
+        assert!(!comma_node.eval(&mut state));
+        let comma_node_true = ExprNode::Comma(vec![ExprNode::Not(Box::new(ExprNode::TrueNode)), ExprNode::TrueNode]);
+        assert!(comma_node_true.eval(&mut state));
+    }
+
+    #[test]
+    fn test_file_types() {
+        let fix = FindTempFixture::new("types");
+        
+        // Regular File
+        let reg_path = fix.file("regular.txt", 10);
+        let reg_meta = fs::symlink_metadata(&reg_path).unwrap();
+        
+        // Directory
+        let dir_path = fix.dir("mydir");
+        let dir_meta = fs::symlink_metadata(&dir_path).unwrap();
+        
+        // Symlink
+        let sym_path = fix.symlink("regular.txt", "mylink");
+        let sym_meta = fs::symlink_metadata(&sym_path).unwrap();
+
+        // Socket
+        let sock_path = fix.root.join("mysock.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+        let sock_meta = fs::symlink_metadata(&sock_path).unwrap();
+
+        // FIFO
+        let fifo_path = fix.root.join("myfifo.fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let fifo_meta = fs::symlink_metadata(&fifo_path).unwrap();
+
+        // Character device (/dev/null)
+        let char_path = Path::new("/dev/null");
+        let char_meta = fs::metadata(char_path).unwrap();
+
+        // Block device (/dev/disk0)
+        let block_path = Path::new("/dev/disk0");
+        let block_meta_opt = fs::metadata(block_path).ok();
+
+        // Helper to evaluate Type predicate
+        let eval_type = |meta: &fs::Metadata, t: char| -> bool {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut state = EvalState {
+                path: Path::new("dummy"),
+                display_path: Path::new("dummy"),
+                metadata: meta,
+                pruned: false,
+                stdout: &mut stdout,
+                stderr: &mut stderr,
+                cwd: Path::new("."),
+            };
+            ExprNode::Type { file_type: t }.eval(&mut state)
+        };
+
+        assert!(eval_type(&reg_meta, 'f'));
+        assert!(!eval_type(&reg_meta, 'd'));
+
+        assert!(eval_type(&dir_meta, 'd'));
+        assert!(!eval_type(&dir_meta, 'f'));
+
+        assert!(eval_type(&sym_meta, 'l'));
+        assert!(!eval_type(&sym_meta, 'f'));
+
+        assert!(eval_type(&sock_meta, 's'));
+        assert!(!eval_type(&sock_meta, 'f'));
+
+        assert!(eval_type(&fifo_meta, 'p'));
+        assert!(!eval_type(&fifo_meta, 'f'));
+
+        assert!(eval_type(&char_meta, 'c'));
+        assert!(!eval_type(&char_meta, 'f'));
+
+        if let Some(block_meta) = block_meta_opt {
+            assert!(eval_type(&block_meta, 'b'));
+            assert!(!eval_type(&block_meta, 'f'));
+        }
+
+        // Unknown type option 'z'
+        assert!(!eval_type(&reg_meta, 'z'));
+    }
+
+    #[test]
+    fn test_size_rounding_exact() {
+        let fix = FindTempFixture::new("size");
+        
+        let file_0 = fix.file("file_0.txt", 0);
+        let file_1 = fix.file("file_1.txt", 1);
+        let file_512 = fix.file("file_512.txt", 512);
+        let file_513 = fix.file("file_513.txt", 513);
+        let file_1024 = fix.file("file_1024.txt", 1024);
+
+        let eval_size = |path: &Path, compare: char, size_val: u64, unit: u64| -> bool {
+            let meta = fs::metadata(path).unwrap();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut state = EvalState {
+                path,
+                display_path: path,
+                metadata: &meta,
+                pruned: false,
+                stdout: &mut stdout,
+                stderr: &mut stderr,
+                cwd: Path::new("."),
+            };
+            ExprNode::Size { compare, size_val, unit }.eval(&mut state)
+        };
+
+        // 512-byte blocks unit (block unit = 512)
+        // 0 bytes = 0 blocks
+        assert!(eval_size(&file_0, '=', 0, 512));
+        assert!(eval_size(&file_0, '-', 1, 512));
+        assert!(!eval_size(&file_0, '+', 0, 512));
+
+        // 1 byte = 1 block
+        assert!(eval_size(&file_1, '=', 1, 512));
+        assert!(eval_size(&file_1, '-', 2, 512));
+
+        // 512 bytes = 1 block
+        assert!(eval_size(&file_512, '=', 1, 512));
+        
+        // 513 bytes = 2 blocks
+        assert!(eval_size(&file_513, '=', 2, 512));
+        assert!(eval_size(&file_513, '+', 1, 512));
+
+        // Exact bytes comparison (unit = 1)
+        assert!(eval_size(&file_1, '=', 1, 1));
+        assert!(eval_size(&file_513, '=', 513, 1));
+        assert!(eval_size(&file_513, '+', 500, 1));
+        assert!(eval_size(&file_513, '-', 600, 1));
+
+        // kbytes comparison (unit = 1024)
+        assert!(eval_size(&file_1024, '=', 1, 1024));
+        assert!(!eval_size(&file_1024, '=', 2, 1024));
+
+        // Unknown size compare char
+        assert!(!eval_size(&file_1024, '?', 1, 1024));
+        assert!(!eval_size(&file_512, '?', 1, 512));
+    }
+
+    #[test]
+    fn test_perm_modes() {
+        let fix = FindTempFixture::new("perms");
+        let f_path = fix.file("perm.txt", 0);
+        fs::set_permissions(&f_path, fs::Permissions::from_mode(0o755)).unwrap();
+        let meta = fs::metadata(&f_path).unwrap();
+
+        let eval_perm = |mode_type: char, mode: u32| -> bool {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut state = EvalState {
+                path: &f_path,
+                display_path: &f_path,
+                metadata: &meta,
+                pruned: false,
+                stdout: &mut stdout,
+                stderr: &mut stderr,
+                cwd: Path::new("."),
+            };
+            ExprNode::Perm { mode_type, mode }.eval(&mut state)
+        };
+
+        // Exact mode (=)
+        assert!(eval_perm('=', 0o755));
+        assert!(!eval_perm('=', 0o644));
+
+        // All bits set (-)
+        assert!(eval_perm('-', 0o700));
+        assert!(eval_perm('-', 0o755));
+        assert!(!eval_perm('-', 0o777));
+
+        // Any bits set (/)
+        assert!(eval_perm('/', 0o001));
+        assert!(eval_perm('/', 0o700));
+        assert!(!eval_perm('/', 0o002));
+
+        // Unknown perm compare char
+        assert!(!eval_perm('?', 0o755));
+    }
+
+    #[test]
+    fn test_exec_evaluation() {
+        let fix = FindTempFixture::new("exec");
+        let f_path = fix.file("file.txt", 0);
+        let meta = fs::metadata(&f_path).unwrap();
+
+        let eval_exec = |command: Vec<String>| -> (bool, String, String) {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut state = EvalState {
+                path: &f_path,
+                display_path: &f_path,
+                metadata: &meta,
+                pruned: false,
+                stdout: &mut stdout,
+                stderr: &mut stderr,
+                cwd: &fix.root,
+            };
+            let matched = ExprNode::Exec { command }.eval(&mut state);
+            (matched, String::from_utf8_lossy(&stdout).into_owned(), String::from_utf8_lossy(&stderr).into_owned())
+        };
+
+        // Success exec
+        let (matched, out, err) = eval_exec(vec!["echo".to_string(), "hello".to_string(), "{}".to_string()]);
+        assert!(matched);
+        assert!(out.contains("hello"));
+        assert!(out.contains("file.txt"));
+        assert!(err.is_empty());
+
+        // Failed exec
+        let (matched, out, err) = eval_exec(vec!["false".to_string()]);
+        assert!(!matched);
+        assert!(out.is_empty());
+        assert!(err.is_empty());
+
+        // Non-existent command exec
+        let (matched, out, err) = eval_exec(vec!["non_existent_command_123_abc".to_string()]);
+        assert!(!matched);
+        assert!(out.is_empty());
+        assert!(err.contains("exec failed"));
+
+        // Empty command
+        let (matched, out, err) = eval_exec(vec![]);
+        assert!(!matched);
+        assert!(out.is_empty());
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn test_delete_action() {
+        let fix = FindTempFixture::new("delete");
+        let f = fix.file("file.txt", 0);
+        let d = fix.dir("subdir");
+        
+        let f_meta = fs::metadata(&f).unwrap();
+        let d_meta = fs::metadata(&d).unwrap();
+
+        let mut stdout_f = Vec::new();
+        let mut stderr_f = Vec::new();
+        
+        // Delete file
+        let mut state_f = EvalState {
+            path: &f,
+            display_path: &f,
+            metadata: &f_meta,
+            pruned: false,
+            stdout: &mut stdout_f,
+            stderr: &mut stderr_f,
+            cwd: &fix.root,
+        };
+        assert!(ExprNode::Delete.eval(&mut state_f));
+        assert!(!f.exists());
+
+        let mut stdout_d = Vec::new();
+        let mut stderr_d = Vec::new();
+
+        // Delete directory
+        let mut state_d = EvalState {
+            path: &d,
+            display_path: &d,
+            metadata: &d_meta,
+            pruned: false,
+            stdout: &mut stdout_d,
+            stderr: &mut stderr_d,
+            cwd: &fix.root,
+        };
+        assert!(ExprNode::Delete.eval(&mut state_d));
+        assert!(!d.exists());
+
+        // Try deleting again (should fail because they do not exist)
+        assert!(!ExprNode::Delete.eval(&mut state_f));
+        assert!(!ExprNode::Delete.eval(&mut state_d));
+        assert!(String::from_utf8_lossy(&stderr_f).contains("cannot delete") || String::from_utf8_lossy(&stderr_d).contains("cannot delete"));
+    }
+
+    #[test]
+    fn test_newer_nodes() {
+        let fix = FindTempFixture::new("newer");
+        let ref_file = fix.file("ref.txt", 0);
+        let _new_file = fix.file("new.txt", 0);
+
+        // Sleep to ensure time difference
+        std::thread::sleep(Duration::from_millis(10));
+        let newer_file = fix.file("newer.txt", 0);
+
+        let ref_meta = fs::metadata(&ref_file).unwrap();
+        let reference_mtime = ref_meta.modified().unwrap();
+
+        let eval_newer = |path: &Path| -> bool {
+            let meta = fs::metadata(path).unwrap();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut state = EvalState {
+                path,
+                display_path: path,
+                metadata: &meta,
+                pruned: false,
+                stdout: &mut stdout,
+                stderr: &mut stderr,
+                cwd: &fix.root,
+            };
+            ExprNode::Newer { reference_mtime }.eval(&mut state)
+        };
+
+        // newer_file is newer than ref_file
+        assert!(eval_newer(&newer_file));
+        // ref_file is not newer than itself
+        assert!(!eval_newer(&ref_file));
+    }
+
+    #[test]
+    fn test_time_nodes() {
+        let fix = FindTempFixture::new("time");
+        let f = fix.file("file.txt", 0);
+        let meta = fs::metadata(&f).unwrap();
+
+        let eval_time = |node: ExprNode| -> bool {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut state = EvalState {
+                path: &f,
+                display_path: &f,
+                metadata: &meta,
+                pruned: false,
+                stdout: &mut stdout,
+                stderr: &mut stderr,
+                cwd: &fix.root,
+            };
+            node.eval(&mut state)
+        };
+
+        // mtime: modified time check (compare: '+', '-', '=')
+        assert!(eval_time(ExprNode::MTime { compare: '-', days: 1 }));
+        assert!(!eval_time(ExprNode::MTime { compare: '+', days: 1 }));
+        assert!(eval_time(ExprNode::MTime { compare: '=', days: 0 }));
+
+        // atime: accessed time check
+        assert!(eval_time(ExprNode::ATime { compare: '-', days: 1 }));
+        assert!(!eval_time(ExprNode::ATime { compare: '+', days: 1 }));
+
+        // ctime: ctime check
+        assert!(eval_time(ExprNode::CTime { compare: '-', days: 1 }));
+        assert!(!eval_time(ExprNode::CTime { compare: '+', days: 1 }));
+
+        // Invalid compare chars
+        assert!(!eval_time(ExprNode::CTime { compare: '?', days: 1 }));
+        assert!(!eval_time(ExprNode::ATime { compare: '?', days: 1 }));
+        assert!(!eval_time(ExprNode::MTime { compare: '?', days: 1 }));
+    }
+
+    #[test]
+    fn test_users_groups() {
+        // Parse numerical IDs
+        assert_eq!(get_uid_by_name("0"), Some(0));
+        assert_eq!(get_gid_by_name("0"), Some(0));
+
+        // Parse root/wheel user/group names
+        let root_uid = get_uid_by_name("root");
+        assert!(root_uid.is_some());
+        
+        let wheel_gid = get_gid_by_name("wheel").or_else(|| get_gid_by_name("root"));
+        assert!(wheel_gid.is_some());
+
+        // Invalid names
+        assert_eq!(get_uid_by_name("nonexistent_user_xyz_123"), None);
+        assert_eq!(get_gid_by_name("nonexistent_group_xyz_123"), None);
+    }
+
+    #[test]
+    fn test_parser_predicate_arguments() {
+        let mut options = TraversalOptions {
+            maxdepth: None,
+            mindepth: None,
+            depth_first: false,
+            mount: false,
+            follow_symlinks: false,
+        };
+
+        let args = vec![
+            "-maxdepth", "3",
+            "-mindepth", "1",
+            "-depth",
+            "-mount",
+            "-name", "*.txt",
+            "-iname", "*.log",
+            "-path", "/a/b/*",
+            "-ipath", "/a/c/*",
+            "-type", "f",
+            "-size", "+100c",
+            "-mtime", "+2",
+            "-atime", "-5",
+            "-ctime", "1",
+            "-perm", "-0755",
+            "-print",
+            "-print0",
+            "-prune",
+        ].into_iter().map(OsString::from).collect::<Vec<_>>();
+
+        let mut parser = Parser::new(&args, Path::new("."), &mut options);
+        let res = parser.parse_expression();
+        assert!(res.is_ok());
+
+        assert_eq!(options.maxdepth, Some(3));
+        assert_eq!(options.mindepth, Some(1));
+        assert!(options.depth_first);
+        assert!(options.mount);
+    }
+
+    #[test]
+    fn test_parser_errors() {
+        let mut options = TraversalOptions {
+            maxdepth: None,
+            mindepth: None,
+            depth_first: false,
+            mount: false,
+            follow_symlinks: false,
+        };
+
+        let mut check_err = |args: Vec<&str>| -> String {
+            let o_args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
+            let mut parser = Parser::new(&o_args, Path::new("."), &mut options);
+            let res = parser.parse_expression();
+            assert!(res.is_err());
+            res.err().unwrap()
+        };
+
+        assert!(check_err(vec!["(", "-print"]).contains("Expected ')'"));
+        assert!(check_err(vec!["-maxdepth", "abc"]).contains("invalid maxdepth"));
+        assert!(check_err(vec!["-mindepth", "abc"]).contains("invalid mindepth"));
+        assert!(check_err(vec!["-type", "xyz"]).contains("invalid file type"));
+        assert!(check_err(vec!["-type", "x"]).contains("unknown file type"));
+        assert!(check_err(vec!["-size", "abc"]).contains("invalid size"));
+        assert!(check_err(vec!["-size", "+abc"]).contains("invalid size"));
+        assert!(check_err(vec!["-size", "+10x"]).contains("unknown size unit"));
+        assert!(check_err(vec!["-perm", "999"]).contains("invalid mode"));
+        assert!(check_err(vec!["-mtime", "abc"]).contains("invalid time value"));
+        assert!(check_err(vec!["-newer", "nonexistent_file_xyz_123"]).contains("cannot stat"));
+        assert!(check_err(vec!["-user", "nonexistent_user_xyz_123"]).contains("not a valid user"));
+        assert!(check_err(vec!["-group", "nonexistent_group_xyz_123"]).contains("not a valid group"));
+        assert!(check_err(vec!["-exec", "echo", "{}"]).contains("missing argument to '-exec'"));
+        assert!(check_err(vec!["-maxdepth"]).contains("missing argument"));
+        assert!(check_err(vec![]).contains("Unexpected end of expression"));
+        assert!(check_err(vec!["-unknown-pred"]).contains("unknown predicate"));
+    }
+
+    #[test]
+    fn test_run_options_and_errors() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        
+        // Extra arguments in run
+        let code = run(
+            vec![OsString::from("."), OsString::from("-print"), OsString::from(")")],
+            Path::new("."),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 1);
+        assert!(String::from_utf8_lossy(&stderr).contains("extra expression arguments"));
+
+        // Missing argument in predicate parsing in run
+        stderr.clear();
+        let code2 = run(
+            vec![OsString::from("."), OsString::from("-maxdepth")],
+            Path::new("."),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code2, 1);
+        assert!(String::from_utf8_lossy(&stderr).contains("missing argument"));
+    }
+
+    #[test]
+    fn test_glob_compilation() {
+        assert!(compile_glob("a*b", false).is_ok());
+        assert!(compile_glob("a?b", false).is_ok());
+        assert!(compile_glob("a[!c]b", false).is_ok());
+        assert!(compile_glob("a[c]b", false).is_ok());
+    }
+
+    #[test]
+    fn test_traverse_loop_detection() {
+        let fix = FindTempFixture::new("trav_loop");
+        let _d = fix.dir("d");
+        let _link = fix.symlink("../d", "d/link");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(
+            vec!["-L".into(), "d".into()],
+            &fix.root,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 1);
+        assert!(String::from_utf8_lossy(&stderr).contains("loop detected"));
     }
 }

@@ -3,6 +3,8 @@
 //! This module implements the core logic of the `grep` command, supporting
 //! option parsing, recursive directory traversal, and pattern matching using
 //! the `regex` crate.
+//! 
+//! [grep.rs](file:///Users/spencergreene/github/rust-unix-tools/src/tools/grep.rs)
 
 use regex::{Regex, RegexBuilder};
 use std::collections::HashSet;
@@ -737,16 +739,23 @@ fn process_file_arg(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
     visited: &mut HashSet<PathBuf>,
+    stdin: &mut impl Read,
 ) -> (bool, bool) {
     let mut match_found = false;
     let mut error_encountered = false;
 
     if file_arg == "-" {
-        let stdin = io::stdin();
-        let mut handle = stdin.lock();
+        let force_filename = num_files > 1;
+        let display_name = if options.no_filename {
+            "".to_string()
+        } else if options.with_filename || force_filename {
+            "(standard input)".to_string()
+        } else {
+            "".to_string()
+        };
         let res = search_reader(
-            &mut handle,
-            "<stdin>",
+            stdin,
+            &display_name,
             options,
             compiled_regexes,
             stdout,
@@ -760,7 +769,12 @@ fn process_file_arg(
             }
             Err(e) => {
                 if !options.no_messages {
-                    let _ = writeln!(stderr, "grep: <stdin>: {}", e);
+                    let err_name = if display_name.is_empty() {
+                        "(standard input)"
+                    } else {
+                        &display_name
+                    };
+                    let _ = writeln!(stderr, "grep: {}: {}", err_name, e);
                 }
                 error_encountered = true;
             }
@@ -844,6 +858,22 @@ pub fn run<I>(
 where
     I: IntoIterator<Item = OsString>,
 {
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+    run_impl(args, cwd, &mut handle, stdout, stderr)
+}
+
+/// Helper that implements the core `grep` logic but allows passing a mock stdin reader.
+pub fn run_impl<I>(
+    args: I,
+    cwd: &Path,
+    stdin: &mut impl Read,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> i32
+where
+    I: IntoIterator<Item = OsString>,
+{
     let args_vec: Vec<OsString> = args.into_iter().collect();
     let parse_result = match parse_options(&args_vec, cwd, stdout, stderr) {
         Ok(res) => res,
@@ -885,6 +915,7 @@ where
             stdout,
             stderr,
             &mut visited,
+            stdin,
         );
         if matched {
             match_found = true;
@@ -911,6 +942,49 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::SystemTime;
+
+    struct GrepTempFixture {
+        root: PathBuf,
+    }
+
+    impl GrepTempFixture {
+        fn new(name: &str) -> Self {
+            use std::time::UNIX_EPOCH;
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("grep-test-{}-{}-{}", name, std::process::id(), nanos));
+            fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+
+        fn file(&self, name: &str, content: &str) -> PathBuf {
+            let p = self.root.join(name);
+            fs::write(&p, content).unwrap();
+            p
+        }
+
+        fn dir(&self, name: &str) -> PathBuf {
+            let p = self.root.join(name);
+            fs::create_dir_all(&p).unwrap();
+            p
+        }
+
+        fn symlink(&self, target: &Path, link_name: &str) -> PathBuf {
+            let p = self.root.join(link_name);
+            let _ = fs::remove_file(&p);
+            std::os::unix::fs::symlink(target, &p).unwrap();
+            p
+        }
+    }
+
+    impl Drop for GrepTempFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
 
     #[test]
     fn test_parse_options_basic() {
@@ -957,6 +1031,115 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_options_validation_errors() {
+        // Missing option argument (e.g. -m without argument at the end)
+        let args = vec![OsString::from("-m")];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let res = parse_options(&args, Path::new("."), &mut stdout, &mut stderr);
+        assert_eq!(res, Err(2));
+
+        // Invalid max-count
+        let args = vec![
+            OsString::from("-m"),
+            OsString::from("not_a_number"),
+            OsString::from("pattern"),
+            OsString::from("file.txt"),
+        ];
+        stderr.clear();
+        let res = parse_options(&args, Path::new("."), &mut stdout, &mut stderr);
+        assert_eq!(res, Err(2));
+        assert!(String::from_utf8_lossy(&stderr).contains("invalid max-count"));
+
+        // Invalid file patterns read
+        let args = vec![
+            OsString::from("-f"),
+            OsString::from("nonexistent_patterns_file.txt"),
+            OsString::from("file.txt"),
+        ];
+        stderr.clear();
+        let res = parse_options(&args, Path::new("."), &mut stdout, &mut stderr);
+        assert_eq!(res, Err(2));
+        assert!(String::from_utf8_lossy(&stderr).contains("grep: nonexistent_patterns_file.txt:"));
+
+        // Invalid file patterns read with -s (suppressed messages)
+        let args = vec![
+            OsString::from("-s"),
+            OsString::from("-f"),
+            OsString::from("nonexistent_patterns_file.txt"),
+            OsString::from("file.txt"),
+        ];
+        stderr.clear();
+        let res = parse_options(&args, Path::new("."), &mut stdout, &mut stderr);
+        assert_eq!(res, Err(2));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn test_parse_all_options() {
+        let args = vec![
+            "-e", "pat1", "-e", "pat2", "-y", "-v", "-w", "-x", "-c", "-L", "-l",
+            "-m", "5", "-o", "-q", "-s", "-b", "-n", "-H", "-h", "-r", "-R", "-F", "-Z",
+            "-E", "-G", "file.txt"
+        ].into_iter().map(OsString::from).collect::<Vec<_>>();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let res = parse_options(&args, Path::new("."), &mut stdout, &mut stderr).unwrap();
+        if let ParseResult::Success { options, files } = res {
+            assert_eq!(options.patterns, vec!["pat1", "pat2"]);
+            assert!(options.ignore_case);
+            assert!(options.invert_match);
+            assert!(options.word_regexp);
+            assert!(options.line_regexp);
+            assert!(options.count);
+            assert!(options.files_without_match);
+            assert!(options.files_with_matches);
+            assert_eq!(options.max_count, Some(5));
+            assert!(options.only_matching);
+            assert!(options.quiet);
+            assert!(options.no_messages);
+            assert!(options.byte_offset);
+            assert!(options.line_number);
+            assert!(options.with_filename);
+            assert!(options.no_filename);
+            assert!(options.recursive);
+            assert!(options.dereference_recursive);
+            assert!(options.fixed_strings);
+            assert!(options.null_separator);
+            assert_eq!(files, vec![OsString::from("file.txt")]);
+        } else {
+            panic!("Expected ParseResult::Success");
+        }
+    }
+
+    #[test]
+    fn test_parse_options_early_exits() {
+        // Help exit
+        let args = vec![OsString::from("--help")];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let res = parse_options(&args, Path::new("."), &mut stdout, &mut stderr).unwrap();
+        assert_eq!(res, ParseResult::EarlyExit(0));
+        assert!(String::from_utf8_lossy(&stdout).contains("Usage: grep"));
+
+        // Version exit
+        let args = vec![OsString::from("-V")];
+        stdout.clear();
+        let res = parse_options(&args, Path::new("."), &mut stdout, &mut stderr).unwrap();
+        assert_eq!(res, ParseResult::EarlyExit(0));
+        assert!(String::from_utf8_lossy(&stdout).contains("grep (rust-unix-tools)"));
+    }
+
+    #[test]
+    fn test_read_patterns_from_file() {
+        let fix = GrepTempFixture::new("read_patterns");
+        let _file_path = fix.file("pats.txt", "abc\ndef\n");
+        let mut patterns = Vec::new();
+        read_patterns_from_file("pats.txt", &fix.root, &mut patterns).unwrap();
+        assert_eq!(patterns, vec!["abc", "def"]);
+    }
+
+    #[test]
     fn test_compile_regexes_simple() {
         let patterns = vec!["hello".to_string(), "world".to_string()];
         let mut options = GrepOptions::new();
@@ -977,6 +1160,45 @@ mod tests {
         assert_eq!(final_p, vec!["h.llo".to_string()]);
         assert!(res[0].is_match("h.llo"));
         assert!(!res[0].is_match("hello"));
+    }
+
+    #[test]
+    fn test_compile_regexes_failure() {
+        let options = GrepOptions::new();
+        let res = compile_regexes(&vec!["[".to_string()], &options);
+        assert!(res.is_err());
+        assert!(res.err().unwrap().contains("invalid regex"));
+
+        // run with compile failure
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(
+            vec![OsString::from("["), OsString::from("-")],
+            Path::new("."),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 2);
+        assert!(String::from_utf8_lossy(&stderr).contains("grep: invalid regex"));
+    }
+
+    #[test]
+    fn test_compile_regexes_newline_split() {
+        let options = GrepOptions::new();
+        let (res, final_p) = compile_regexes(&vec!["a\nb".to_string()], &options).unwrap();
+        assert_eq!(final_p, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(res.len(), 2);
+    }
+
+    #[test]
+    fn test_determine_display_filename() {
+        let mut options = GrepOptions::new();
+        assert_eq!(determine_display_filename(OsStr::new("file.txt"), &options, false), "");
+        assert_eq!(determine_display_filename(OsStr::new("file.txt"), &options, true), "file.txt");
+        options.with_filename = true;
+        assert_eq!(determine_display_filename(OsStr::new("file.txt"), &options, false), "file.txt");
+        options.no_filename = true;
+        assert_eq!(determine_display_filename(OsStr::new("file.txt"), &options, true), "");
     }
 
     #[test]
@@ -1004,6 +1226,31 @@ mod tests {
         // No word boundary: no match
         let (matched, _) = match_line("123abc456", &res, &raw, &options);
         assert!(!matched);
+
+        // Word boundary edge cases
+        let (matched, _) = match_line("abc", &res, &raw, &options);
+        assert!(matched);
+
+        // Under standard regex word character definition, underscore is a word character.
+        // Therefore `_abc` is not a word boundary match for `abc`.
+        let (matched, _) = match_line("_abc", &res, &raw, &options);
+        assert!(!matched);
+
+        let (matched, _) = match_line("abc_", &res, &raw, &options);
+        assert!(!matched);
+
+        let (matched, _) = match_line("abc-def", &res, &raw, &options);
+        assert!(matched);
+    }
+
+    #[test]
+    fn test_match_line_word_regexp_empty_pattern() {
+        let mut options = GrepOptions::new();
+        options.word_regexp = true;
+        let patterns = vec!["".to_string()];
+        let (res, raw) = compile_regexes(&patterns, &options).unwrap();
+        let (matched, _) = match_line("hello", &res, &raw, &options);
+        assert!(!matched);
     }
 
     #[test]
@@ -1018,5 +1265,364 @@ mod tests {
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0], (4, 7, "abc".to_string()));
         assert_eq!(ranges[1], (12, 15, "abc".to_string()));
+    }
+
+    #[test]
+    fn test_match_line_only_matching_word_regexp() {
+        let mut options = GrepOptions::new();
+        options.only_matching = true;
+        options.word_regexp = true;
+        let patterns = vec!["abc".to_string()];
+        let (res, raw) = compile_regexes(&patterns, &options).unwrap();
+
+        let (matched, ranges) = match_line("123 abc 456abc", &res, &raw, &options);
+        assert!(matched);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], (4, 7, "abc".to_string()));
+    }
+
+    #[test]
+    fn test_search_file_not_found() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut match_found = false;
+        let mut error_encountered = false;
+        let options = GrepOptions::new();
+        search_file(
+            Path::new("non_existent_file_xyz.txt"),
+            OsStr::new("non_existent_file_xyz.txt"),
+            "prefix",
+            &options,
+            &[],
+            &[],
+            &mut stdout,
+            &mut stderr,
+            &mut match_found,
+            &mut error_encountered,
+        );
+        assert!(!match_found);
+        assert!(error_encountered);
+        assert!(String::from_utf8_lossy(&stderr).contains("grep: non_existent_file_xyz.txt:"));
+    }
+
+    #[test]
+    fn test_read_dir_entries_on_file() {
+        let fix = GrepTempFixture::new("read_dir_file");
+        let f_path = fix.file("f.txt", "content");
+        let mut stderr = Vec::new();
+        let mut error_encountered = false;
+        let options = GrepOptions::new();
+        let res = read_dir_entries(
+            &f_path,
+            OsStr::new("f.txt"),
+            &options,
+            &mut stderr,
+            &mut error_encountered,
+        );
+        assert!(res.is_none());
+        assert!(error_encountered);
+        assert!(String::from_utf8_lossy(&stderr).contains("grep: f.txt:"));
+    }
+
+    #[test]
+    fn test_search_recursive_canonicalize_failure() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut match_found = false;
+        let mut error_encountered = false;
+        let options = GrepOptions::new();
+        let mut visited = HashSet::new();
+        search_recursive(
+            Path::new("non_existent_dir_abc"),
+            OsStr::new("non_existent_dir_abc"),
+            false,
+            &options,
+            &[],
+            &[],
+            &mut stdout,
+            &mut stderr,
+            &mut match_found,
+            &mut error_encountered,
+            &mut visited,
+        );
+        assert!(!match_found);
+        assert!(error_encountered);
+        assert!(String::from_utf8_lossy(&stderr).contains("grep: non_existent_dir_abc:"));
+    }
+
+    struct MockErrorReader;
+    impl Read for MockErrorReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::Other, "mock error"))
+        }
+    }
+
+    #[test]
+    fn test_search_reader_io_error() {
+        let mut stdout = Vec::new();
+        let options = GrepOptions::new();
+        let res = search_reader(
+            &mut MockErrorReader,
+            "filename",
+            &options,
+            &[],
+            &mut stdout,
+            &[],
+        );
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_output_counting() {
+        let mut options = GrepOptions::new();
+        options.count = true;
+        let (regexes, raw) = compile_regexes(&vec!["pat".to_string()], &options).unwrap();
+        let mut stdout = Vec::new();
+        let mut reader = io::Cursor::new("pat 1\nno match\npat 2\n");
+        let res = search_reader(
+            &mut reader,
+            "file.txt",
+            &options,
+            &regexes,
+            &mut stdout,
+            &raw,
+        ).unwrap();
+        assert!(res);
+        assert_eq!(String::from_utf8_lossy(&stdout), "file.txt:2\n");
+    }
+
+    #[test]
+    fn test_output_counting_no_filename() {
+        let mut options = GrepOptions::new();
+        options.count = true;
+        let (regexes, raw) = compile_regexes(&vec!["pat".to_string()], &options).unwrap();
+        let mut stdout = Vec::new();
+        let mut reader = io::Cursor::new("pat 1\n");
+        let res = search_reader(
+            &mut reader,
+            "",
+            &options,
+            &regexes,
+            &mut stdout,
+            &raw,
+        ).unwrap();
+        assert!(res);
+        assert_eq!(String::from_utf8_lossy(&stdout), "1\n");
+    }
+
+    #[test]
+    fn test_output_counting_null_separator() {
+        let mut options = GrepOptions::new();
+        options.count = true;
+        options.null_separator = true;
+        let (regexes, raw) = compile_regexes(&vec!["pat".to_string()], &options).unwrap();
+        let mut stdout = Vec::new();
+        let mut reader = io::Cursor::new("pat 1\n");
+        let res = search_reader(
+            &mut reader,
+            "file.txt",
+            &options,
+            &regexes,
+            &mut stdout,
+            &raw,
+        ).unwrap();
+        assert!(res);
+        let expected = format!("file.txt\01\n");
+        assert_eq!(String::from_utf8_lossy(&stdout), expected);
+    }
+
+    #[test]
+    fn test_output_files_with_matches() {
+        let mut options = GrepOptions::new();
+        options.files_with_matches = true;
+        let (regexes, raw) = compile_regexes(&vec!["pat".to_string()], &options).unwrap();
+        let mut stdout = Vec::new();
+        let mut reader = io::Cursor::new("pat 1\n");
+        let res = search_reader(
+            &mut reader,
+            "file.txt",
+            &options,
+            &regexes,
+            &mut stdout,
+            &raw,
+        ).unwrap();
+        assert!(res);
+        assert_eq!(String::from_utf8_lossy(&stdout), "file.txt\n");
+    }
+
+    #[test]
+    fn test_output_files_without_match() {
+        let mut options = GrepOptions::new();
+        options.files_without_match = true;
+        let (regexes, raw) = compile_regexes(&vec!["pat".to_string()], &options).unwrap();
+        let mut stdout = Vec::new();
+        let mut reader = io::Cursor::new("no match\n");
+        let res = search_reader(
+            &mut reader,
+            "file.txt",
+            &options,
+            &regexes,
+            &mut stdout,
+            &raw,
+        ).unwrap();
+        assert!(!res);
+        assert_eq!(String::from_utf8_lossy(&stdout), "file.txt\n");
+    }
+
+    #[test]
+    fn test_output_quiet() {
+        let mut options = GrepOptions::new();
+        options.quiet = true;
+        let (regexes, raw) = compile_regexes(&vec!["pat".to_string()], &options).unwrap();
+        let mut stdout = Vec::new();
+        let mut reader = io::Cursor::new("pat 1\n");
+        let res = search_reader(
+            &mut reader,
+            "file.txt",
+            &options,
+            &regexes,
+            &mut stdout,
+            &raw,
+        ).unwrap();
+        assert!(res);
+        assert!(stdout.is_empty());
+    }
+
+    #[test]
+    fn test_print_prefix_null() {
+        let mut options = GrepOptions::new();
+        options.null_separator = true;
+        let mut stdout = Vec::new();
+        print_prefix(&mut stdout, "file.txt", 1, 0, &options).unwrap();
+        let expected = format!("file.txt\0");
+        assert_eq!(String::from_utf8_lossy(&stdout), expected);
+    }
+
+    #[test]
+    fn test_process_file_arg_non_recursive_dir() {
+        let fix = GrepTempFixture::new("process_file_arg_dir");
+        let d = fix.dir("mydir");
+        let options = GrepOptions::new();
+        let (regexes, raw) = compile_regexes(&vec!["pat".to_string()], &options).unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut visited = HashSet::new();
+        let (matched, err) = process_file_arg(
+            d.as_os_str(),
+            &fix.root,
+            1,
+            &options,
+            &regexes,
+            &raw,
+            &mut stdout,
+            &mut stderr,
+            &mut visited,
+            &mut std::io::empty(),
+        );
+        assert!(!matched);
+        assert!(err);
+        assert!(String::from_utf8_lossy(&stderr).contains("Is a directory"));
+    }
+
+    #[test]
+    fn test_run_empty_files_arg() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut stdin = std::io::Cursor::new("line1\npattern matches\nline3");
+        let code = run_impl(
+            vec![OsString::from("pattern")],
+            Path::new("."),
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "pattern matches\n");
+    }
+
+    #[test]
+    fn test_run_non_existent_file() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(
+            vec![OsString::from("pattern"), OsString::from("nonexistent_file_xyz.txt")],
+            Path::new("."),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 2);
+        assert!(String::from_utf8_lossy(&stderr).contains("grep: nonexistent_file_xyz.txt:"));
+    }
+
+    #[test]
+    fn test_recursive_loop_detection() {
+        let fix = GrepTempFixture::new("rec_loop");
+        let d1 = fix.dir("d1");
+        let _d2 = fix.dir("d1/d2");
+        let _link = fix.symlink(&d1, "d1/d2/loop_link");
+        
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(
+            vec![OsString::from("-R"), OsString::from("hello"), OsString::from("d1")],
+            &fix.root,
+            &mut stdout,
+            &mut stderr,
+        );
+        // Code should complete (either 1 if no hello found, or 0 if found) but not infinite loop
+        assert!(code == 1 || code == 0);
+    }
+
+    #[test]
+    fn test_no_newline_handling() {
+        let fix = GrepTempFixture::new("no_newline");
+        let _f = fix.file("f.txt", "hello"); // No trailing newline
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(
+            vec![OsString::from("hello"), OsString::from("f.txt")],
+            &fix.root,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0);
+        // The output should have hello followed by a newline because we ensure a newline
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello\n");
+    }
+
+    #[test]
+    fn test_stdin_argument() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut stdin = std::io::Cursor::new("hello pattern\nworld");
+        let code = run_impl(
+            vec![OsString::from("pat"), OsString::from("-")],
+            Path::new("."),
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello pattern\n");
+    }
+
+    #[test]
+    fn test_symlink_recursive_follow() {
+        let fix = GrepTempFixture::new("symlink_rec");
+        let d = fix.dir("dir");
+        let _f = fix.file("dir/f.txt", "hello");
+        let _sym = fix.symlink(&d, "sym");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        // -R follows symlinks, -r does not.
+        let code = run(
+            vec![OsString::from("-R"), OsString::from("hello"), OsString::from("sym")],
+            &fix.root,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0);
+        assert!(String::from_utf8_lossy(&stdout).contains("hello"));
     }
 }

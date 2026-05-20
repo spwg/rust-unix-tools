@@ -2,6 +2,8 @@
 //!
 //! This module implements the core logic of the `cat` command, supporting
 //! option parsing and line-by-line formatting matching GNU coreutils.
+//! 
+//! [cat.rs](file:///Users/spencergreene/github/rust-unix-tools/src/tools/cat.rs)
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -41,6 +43,22 @@ impl CatOptions {
 pub fn run<I>(
     args: I,
     cwd: &Path,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> i32
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+    run_impl(args, cwd, &mut handle, stdout, stderr)
+}
+
+/// Helper that implements the core `cat` logic but allows passing a mock stdin reader.
+pub fn run_impl<I>(
+    args: I,
+    cwd: &Path,
+    stdin: &mut impl Read,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> i32
@@ -115,35 +133,34 @@ where
     ];
 
     let parsed_args = match crate::getopt::parse(&args_vec, specs, false) {
-        Ok(args) => args,
-        Err(err) => {
-            let _ = writeln!(stderr, "cat: {}", err);
-            let _ = writeln!(stderr, "Try 'cat --help' for more information.");
+        Ok(res) => res,
+        Err(e) => {
+            let _ = writeln!(stderr, "cat: {}", e);
             return 1;
         }
     };
 
     for arg in parsed_args {
         match arg {
-            crate::getopt::ParsedArg::Option { short, long, .. } => {
+            crate::getopt::ParsedArg::Option { short, long, value: _ } => {
                 match (short, long) {
                     (_, Some("help")) => {
                         let _ = writeln!(
                             stdout,
                             "Usage: cat [OPTION]... [FILE]...\n\
                              Concatenate FILE(s) to standard output.\n\n\
-                               -A, --show-all           equivalent to -vET\n\
-                               -b, --number-nonblank    number nonempty output lines, overrides -n\n\
-                               -e                       equivalent to -vE\n\
-                               -E, --show-ends          display $ at end of each line\n\
-                               -n, --number             number all output lines\n\
-                               -s, --squeeze-blank      suppress repeated empty output lines\n\
-                               -t                       equivalent to -vT\n\
-                               -T, --show-tabs          display TAB characters as ^I\n\
-                               -u                       (ignored)\n\
-                               -v, --show-nonprinting   use ^ and M- notation, except for LFD and TAB\n\
-                                   --help        display this help and exit\n\
-                                   --version     output version information and exit"
+                                -A, --show-all           equivalent to -vET\n\
+                                -b, --number-nonblank    number nonempty output lines, overrides -n\n\
+                                -e                       equivalent to -vE\n\
+                                -E, --show-ends          display $ at end of each line\n\
+                                -n, --number             number all output lines\n\
+                                -s, --squeeze-blank      suppress repeated empty output lines\n\
+                                -t                       equivalent to -vT\n\
+                                -T, --show-tabs          display TAB characters as ^I\n\
+                                -u                       (ignored)\n\
+                                -v, --show-nonprinting   use ^ and M- notation, except for LFD and TAB\n\
+                                    --help        display this help and exit\n\
+                                    --version     output version information and exit"
                         );
                         return 0;
                     }
@@ -157,6 +174,7 @@ where
                         options.show_tabs = true;
                     }
                     (Some('b'), _) | (_, Some("number-nonblank")) => {
+                        options.number = true;
                         options.number_nonblank = true;
                     }
                     (Some('e'), _) => {
@@ -203,13 +221,10 @@ where
     let mut consecutive_empty_lines = 0;
     let mut line_number = 0;
 
-    let stdin = io::stdin();
-
     for file_arg in files {
         if file_arg == "-" {
-            let mut handle = stdin.lock();
             if let Err(e) = process_reader(
-                &mut handle,
+                stdin,
                 stdout,
                 &options,
                 &mut at_line_start,
@@ -468,5 +483,244 @@ mod tests {
 
         let output_str = String::from_utf8(output).unwrap();
         assert_eq!(output_str, "     1\thello\n\n     2\tworld\n");
+    }
+
+    #[test]
+    fn test_cat_help() {
+        let args = vec![std::ffi::OsString::from("--help")];
+        let cwd = Path::new(".");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(args, cwd, &mut stdout, &mut stderr);
+        assert_eq!(code, 0);
+        let out_str = String::from_utf8_lossy(&stdout);
+        assert!(out_str.contains("Usage: cat [OPTION]... [FILE]..."));
+    }
+
+    #[test]
+    fn test_cat_version() {
+        let args = vec![std::ffi::OsString::from("--version")];
+        let cwd = Path::new(".");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(args, cwd, &mut stdout, &mut stderr);
+        assert_eq!(code, 0);
+        let out_str = String::from_utf8_lossy(&stdout);
+        assert!(out_str.contains("cat (rust-unix-tools)"));
+    }
+
+    #[test]
+    fn test_cat_ignored_u() {
+        let temp_path = Path::new("temp_test_cat_u.txt");
+        std::fs::write(temp_path, "hello").unwrap();
+
+        let args = vec![
+            std::ffi::OsString::from("-u"),
+            std::ffi::OsString::from("temp_test_cat_u.txt"),
+        ];
+        let cwd = Path::new(".");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(args, cwd, &mut stdout, &mut stderr);
+        
+        let _ = std::fs::remove_file(temp_path);
+        
+        assert_eq!(code, 0);
+        assert_eq!(stdout, b"hello");
+    }
+
+    #[test]
+    fn test_cat_invalid_file() {
+        let args = vec![std::ffi::OsString::from("nonexistent_file_xyz.txt")];
+        let cwd = Path::new(".");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(args, cwd, &mut stdout, &mut stderr);
+        assert_eq!(code, 1);
+        let err_str = String::from_utf8_lossy(&stderr);
+        assert!(err_str.contains("nonexistent_file_xyz.txt"));
+    }
+
+    #[test]
+    fn test_cat_option_errors() {
+        let args = vec![std::ffi::OsString::from("--invalid-option")];
+        let cwd = Path::new(".");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(args, cwd, &mut stdout, &mut stderr);
+        assert_ne!(code, 0);
+        assert!(String::from_utf8_lossy(&stderr).contains("unrecognized option"));
+    }
+
+    #[test]
+    fn test_cat_run_stdin() {
+        let args = vec![std::ffi::OsString::from("-")];
+        let cwd = Path::new(".");
+        let mut stdin = io::Cursor::new("hello stdin");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_impl(args, cwd, &mut stdin, &mut stdout, &mut stderr);
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello stdin");
+    }
+
+    #[test]
+    fn test_cat_run_no_args() {
+        let args: Vec<std::ffi::OsString> = vec![];
+        let cwd = Path::new(".");
+        let mut stdin = io::Cursor::new("hello standard input");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_impl(args, cwd, &mut stdin, &mut stdout, &mut stderr);
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello standard input");
+    }
+
+    #[test]
+    fn test_cat_directory_error() {
+        let args = vec![std::ffi::OsString::from(".")];
+        let cwd = Path::new(".");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(args, cwd, &mut stdout, &mut stderr);
+        assert_ne!(code, 0);
+        let err_str = String::from_utf8_lossy(&stderr);
+        assert!(err_str.contains("Is a directory") || err_str.contains("is a directory") || err_str.contains("Permission denied"));
+    }
+
+    #[test]
+    fn test_cat_various_options() {
+        let temp_path = Path::new("temp_test_cat_opts.txt");
+        std::fs::write(temp_path, "hello\tworld\n\nline3\n").unwrap();
+
+        // Option -A
+        let args = vec![
+            std::ffi::OsString::from("-A"),
+            std::ffi::OsString::from("temp_test_cat_opts.txt"),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(run(args, Path::new("."), &mut stdout, &mut stderr), 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello^Iworld$\n$\nline3$\n");
+
+        // Option -b
+        let args = vec![
+            std::ffi::OsString::from("-b"),
+            std::ffi::OsString::from("temp_test_cat_opts.txt"),
+        ];
+        stdout.clear();
+        assert_eq!(run(args, Path::new("."), &mut stdout, &mut stderr), 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "     1\thello\tworld\n\n     2\tline3\n");
+
+        // Option -e
+        let args = vec![
+            std::ffi::OsString::from("-e"),
+            std::ffi::OsString::from("temp_test_cat_opts.txt"),
+        ];
+        stdout.clear();
+        assert_eq!(run(args, Path::new("."), &mut stdout, &mut stderr), 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello\tworld$\n$\nline3$\n");
+
+        // Option -t
+        let args = vec![
+            std::ffi::OsString::from("-t"),
+            std::ffi::OsString::from("temp_test_cat_opts.txt"),
+        ];
+        stdout.clear();
+        assert_eq!(run(args, Path::new("."), &mut stdout, &mut stderr), 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello^Iworld\n\nline3\n");
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_cat_long_options() {
+        let temp_path = Path::new("temp_test_cat_long_opts.txt");
+        std::fs::write(temp_path, "hello\tworld\n\nline3\n").unwrap();
+
+        // Option --show-all
+        let args = vec![
+            std::ffi::OsString::from("--show-all"),
+            std::ffi::OsString::from("temp_test_cat_long_opts.txt"),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(run(args, Path::new("."), &mut stdout, &mut stderr), 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello^Iworld$\n$\nline3$\n");
+
+        // Option --number-nonblank
+        let args = vec![
+            std::ffi::OsString::from("--number-nonblank"),
+            std::ffi::OsString::from("temp_test_cat_long_opts.txt"),
+        ];
+        stdout.clear();
+        assert_eq!(run(args, Path::new("."), &mut stdout, &mut stderr), 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "     1\thello\tworld\n\n     2\tline3\n");
+
+        // Option --show-ends
+        let args = vec![
+            std::ffi::OsString::from("--show-ends"),
+            std::ffi::OsString::from("temp_test_cat_long_opts.txt"),
+        ];
+        stdout.clear();
+        assert_eq!(run(args, Path::new("."), &mut stdout, &mut stderr), 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello\tworld$\n$\nline3$\n");
+
+        // Option --number
+        let args = vec![
+            std::ffi::OsString::from("--number"),
+            std::ffi::OsString::from("temp_test_cat_long_opts.txt"),
+        ];
+        stdout.clear();
+        assert_eq!(run(args, Path::new("."), &mut stdout, &mut stderr), 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "     1\thello\tworld\n     2\t\n     3\tline3\n");
+
+        // Option --squeeze-blank
+        let args = vec![
+            std::ffi::OsString::from("--squeeze-blank"),
+            std::ffi::OsString::from("temp_test_cat_long_opts.txt"),
+        ];
+        stdout.clear();
+        assert_eq!(run(args, Path::new("."), &mut stdout, &mut stderr), 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello\tworld\n\nline3\n");
+
+        // Option --show-tabs
+        let args = vec![
+            std::ffi::OsString::from("--show-tabs"),
+            std::ffi::OsString::from("temp_test_cat_long_opts.txt"),
+        ];
+        stdout.clear();
+        assert_eq!(run(args, Path::new("."), &mut stdout, &mut stderr), 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello^Iworld\n\nline3\n");
+
+        // Option --show-nonprinting
+        let args = vec![
+            std::ffi::OsString::from("--show-nonprinting"),
+            std::ffi::OsString::from("temp_test_cat_long_opts.txt"),
+        ];
+        stdout.clear();
+        assert_eq!(run(args, Path::new("."), &mut stdout, &mut stderr), 0);
+        assert_eq!(String::from_utf8_lossy(&stdout), "hello\tworld\n\nline3\n");
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    struct FailingReader;
+    impl std::io::Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "mock error"))
+        }
+    }
+
+    #[test]
+    fn test_cat_run_failing_stdin() {
+        let args = vec![std::ffi::OsString::from("-")];
+        let cwd = Path::new(".");
+        let mut stdin = FailingReader;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_impl(args, cwd, &mut stdin, &mut stdout, &mut stderr);
+        assert_eq!(code, 1);
+        assert!(String::from_utf8_lossy(&stderr).contains("mock error"));
     }
 }

@@ -4,6 +4,8 @@
 //! coreutils `ls(1)` man page shipped in this repository's test fixtures. It
 //! favors deterministic non-terminal output: one entry per line unless an
 //! explicit format option requests otherwise.
+//! 
+//! [ls.rs](file:///Users/spencergreene/github/rust-unix-tools/src/tools/ls.rs)
 
 use crate::getopt::{HasArg, OptSpec, ParsedArg};
 use std::cmp::Ordering;
@@ -15,7 +17,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 enum Format {
     One,
     Columns,
@@ -23,7 +25,7 @@ enum Format {
     Long,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 enum Indicator {
     None,
     Slash,
@@ -31,7 +33,7 @@ enum Indicator {
     Classify,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 enum Sort {
     Name,
     None,
@@ -40,7 +42,7 @@ enum Sort {
     Extension,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum TimeField {
     Modified,
     Accessed,
@@ -883,8 +885,6 @@ fn compare_os(left: &OsStr, right: &OsStr) -> Ordering {
     left.as_bytes().cmp(right.as_bytes())
 }
 
-
-
 fn set_sort(value: &OsStr, options: &mut Options) -> Result<(), String> {
     match value.as_bytes() {
         b"none" => options.sort = Sort::None,
@@ -929,4 +929,537 @@ fn os_lossy(value: &OsStr) -> String {
 
 fn bytes_lossy(value: &[u8]) -> String {
     String::from_utf8_lossy(value).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::ffi::OsString;
+    use std::cmp::Ordering;
+
+    fn make_entry(path: &Path, display_name: &str) -> Entry {
+        let metadata = fs::metadata(path).unwrap();
+        Entry {
+            display_name: OsString::from(display_name),
+            display_path: PathBuf::from(display_name),
+            path: path.to_path_buf(),
+            metadata,
+        }
+    }
+
+    #[test]
+    fn test_parse_args_help_version() {
+        let parsed = parse_args(vec!["--help"]).unwrap();
+        assert!(parsed.help);
+
+        let parsed = parse_args(vec!["--version"]).unwrap();
+        assert!(parsed.version);
+    }
+
+    #[test]
+    fn test_parse_args_all_flags() {
+        let parsed = parse_args(vec![
+            "-a", "-A", "-B", "-d", "-h", "-i", "-s", "-k", "-L", "-R",
+        ]).unwrap();
+        assert!(parsed.options.all);
+        assert!(parsed.options.almost_all);
+        assert!(parsed.options.ignore_backups);
+        assert!(parsed.options.directory);
+        assert!(parsed.options.human_readable);
+        assert!(parsed.options.inode);
+        assert!(parsed.options.size);
+        assert_eq!(parsed.options.block_size, 1024);
+        assert!(parsed.options.dereference);
+        assert!(parsed.options.recursive);
+
+        // Test long names
+        let parsed = parse_args(vec![
+            "--all", "--almost-all", "--ignore-backups", "--directory",
+            "--human-readable", "--inode", "--size", "--kibibytes",
+            "--dereference", "--recursive", "--group-directories-first",
+            "--numeric-uid-gid", "--no-group",
+        ]).unwrap();
+        assert!(parsed.options.all);
+        assert!(parsed.options.almost_all);
+        assert!(parsed.options.ignore_backups);
+        assert!(parsed.options.directory);
+        assert!(parsed.options.human_readable);
+        assert!(parsed.options.inode);
+        assert!(parsed.options.size);
+        assert_eq!(parsed.options.block_size, 1024);
+        assert!(parsed.options.dereference);
+        assert!(parsed.options.recursive);
+        assert!(parsed.options.group_dirs_first);
+        assert!(parsed.options.numeric);
+        assert!(parsed.options.omit_group);
+
+        // Test other flags
+        let parsed = parse_args(vec!["-c"]).unwrap();
+        assert!(matches!(parsed.options.time, TimeField::Changed));
+
+        let parsed = parse_args(vec!["-u"]).unwrap();
+        assert!(matches!(parsed.options.time, TimeField::Accessed));
+
+        let parsed = parse_args(vec!["-S"]).unwrap();
+        assert!(matches!(parsed.options.sort, Sort::Size));
+
+        let parsed = parse_args(vec!["-t"]).unwrap();
+        assert!(matches!(parsed.options.sort, Sort::Time));
+
+        let parsed = parse_args(vec!["-X"]).unwrap();
+        assert!(matches!(parsed.options.sort, Sort::Extension));
+
+        let parsed = parse_args(vec!["-v"]).unwrap();
+        assert!(matches!(parsed.options.sort, Sort::Name));
+
+        let parsed = parse_args(vec!["-f"]).unwrap();
+        assert!(parsed.options.all);
+        assert!(matches!(parsed.options.sort, Sort::None));
+
+        let parsed = parse_args(vec!["-U"]).unwrap();
+        assert!(parsed.options.all);
+        assert!(matches!(parsed.options.sort, Sort::None));
+
+        let parsed = parse_args(vec!["-g"]).unwrap();
+        assert_eq!(parsed.options.format, Format::Long);
+        assert!(parsed.options.omit_owner);
+
+        let parsed = parse_args(vec!["-G"]).unwrap();
+        assert!(parsed.options.omit_group);
+
+        let parsed = parse_args(vec!["-o"]).unwrap();
+        assert_eq!(parsed.options.format, Format::Long);
+        assert!(parsed.options.omit_group);
+
+        let parsed = parse_args(vec!["-p"]).unwrap();
+        assert_eq!(parsed.options.indicator, Indicator::Slash);
+
+        let parsed = parse_args(vec!["-F"]).unwrap();
+        assert_eq!(parsed.options.indicator, Indicator::Classify);
+
+        let parsed = parse_args(vec!["--classify=never"]).unwrap();
+        assert_eq!(parsed.options.indicator, Indicator::None);
+
+        let parsed = parse_args(vec!["-C"]).unwrap();
+        assert_eq!(parsed.options.format, Format::Columns);
+
+        let parsed = parse_args(vec!["-x"]).unwrap();
+        assert_eq!(parsed.options.format, Format::Columns);
+
+        let parsed = parse_args(vec!["-m"]).unwrap();
+        assert_eq!(parsed.options.format, Format::Commas);
+
+        let parsed = parse_args(vec!["-1"]).unwrap();
+        assert_eq!(parsed.options.format, Format::One);
+
+        let parsed = parse_args(vec!["--si"]).unwrap();
+        assert_eq!(parsed.options.block_size, 1000);
+
+        let parsed = parse_args(vec!["--zero"]).unwrap();
+        assert_eq!(parsed.options.format, Format::One);
+    }
+
+    #[test]
+    fn test_parse_args_indicator_styles() {
+        let parsed = parse_args(vec!["--indicator-style=none"]).unwrap();
+        assert_eq!(parsed.options.indicator, Indicator::None);
+
+        let parsed = parse_args(vec!["--indicator-style=slash"]).unwrap();
+        assert_eq!(parsed.options.indicator, Indicator::Slash);
+
+        let parsed = parse_args(vec!["--indicator-style=file-type"]).unwrap();
+        assert_eq!(parsed.options.indicator, Indicator::FileType);
+
+        let parsed = parse_args(vec!["--indicator-style=classify"]).unwrap();
+        assert_eq!(parsed.options.indicator, Indicator::Classify);
+
+        let parsed = parse_args(vec!["--file-type"]).unwrap();
+        assert_eq!(parsed.options.indicator, Indicator::FileType);
+    }
+
+    #[test]
+    fn test_parse_args_formats() {
+        let parsed = parse_args(vec!["--format=single-column"]).unwrap();
+        assert_eq!(parsed.options.format, Format::One);
+
+        let parsed = parse_args(vec!["--format=long"]).unwrap();
+        assert_eq!(parsed.options.format, Format::Long);
+
+        let parsed = parse_args(vec!["--format=verbose"]).unwrap();
+        assert_eq!(parsed.options.format, Format::Long);
+
+        let parsed = parse_args(vec!["--format=commas"]).unwrap();
+        assert_eq!(parsed.options.format, Format::Commas);
+
+        let parsed = parse_args(vec!["--format=vertical"]).unwrap();
+        assert_eq!(parsed.options.format, Format::Columns);
+    }
+
+    #[test]
+    fn test_parse_args_sorts() {
+        let parsed = parse_args(vec!["--sort=none"]).unwrap();
+        assert_eq!(parsed.options.sort, Sort::None);
+
+        let parsed = parse_args(vec!["--sort=size"]).unwrap();
+        assert_eq!(parsed.options.sort, Sort::Size);
+
+        let parsed = parse_args(vec!["--sort=time"]).unwrap();
+        assert_eq!(parsed.options.sort, Sort::Time);
+
+        let parsed = parse_args(vec!["--sort=extension"]).unwrap();
+        assert_eq!(parsed.options.sort, Sort::Extension);
+
+        let parsed = parse_args(vec!["--sort=name"]).unwrap();
+        assert_eq!(parsed.options.sort, Sort::Name);
+    }
+
+    #[test]
+    fn test_parse_args_times() {
+        let parsed = parse_args(vec!["--time=atime"]).unwrap();
+        assert!(matches!(parsed.options.time, TimeField::Accessed));
+
+        let parsed = parse_args(vec!["--time=ctime"]).unwrap();
+        assert!(matches!(parsed.options.time, TimeField::Changed));
+
+        let parsed = parse_args(vec!["--time=mtime"]).unwrap();
+        assert!(matches!(parsed.options.time, TimeField::Modified));
+
+        let parsed = parse_args(vec!["--time=birth"]).unwrap();
+        assert!(matches!(parsed.options.time, TimeField::Modified));
+    }
+
+    #[test]
+    fn test_parse_args_block_sizes() {
+        let parsed = parse_args(vec!["--block-size=K"]).unwrap();
+        assert_eq!(parsed.options.block_size, 1024);
+
+        let parsed = parse_args(vec!["--block-size=KB"]).unwrap();
+        assert_eq!(parsed.options.block_size, 1000);
+
+        let parsed = parse_args(vec!["--block-size=M"]).unwrap();
+        assert_eq!(parsed.options.block_size, 1024 * 1024);
+
+        let parsed = parse_args(vec!["--block-size=MB"]).unwrap();
+        assert_eq!(parsed.options.block_size, 1000 * 1000);
+
+        let parsed = parse_args(vec!["--block-size=4096"]).unwrap();
+        assert_eq!(parsed.options.block_size, 4096);
+    }
+
+    #[test]
+    fn test_parse_args_errors() {
+        assert!(parse_args(vec!["--invalid-option"]).is_err());
+        assert!(parse_args(vec!["--indicator-style=invalid"]).is_err());
+        assert!(parse_args(vec!["--format=invalid"]).is_err());
+        assert!(parse_args(vec!["--sort=invalid"]).is_err());
+        assert!(parse_args(vec!["--time=invalid"]).is_err());
+        assert!(parse_args(vec!["--block-size=invalid"]).is_err());
+    }
+
+    #[test]
+    fn test_extension_helper() {
+        assert_eq!(extension(OsStr::new("")), b"");
+        assert_eq!(extension(OsStr::new(".")), b"");
+        assert_eq!(extension(OsStr::new(".foo")), b"");
+        assert_eq!(extension(OsStr::new("foo.bar")), b"bar");
+        assert_eq!(extension(OsStr::new("foo.bar.baz")), b"baz");
+    }
+
+    #[test]
+    fn test_sort_logic() {
+        let temp_dir = std::env::temp_dir();
+        let path_a = temp_dir.join("test_sort_a.txt");
+        let path_b = temp_dir.join("test_sort_b.log");
+        std::fs::write(&path_a, "a").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&path_b, "bb").unwrap();
+
+        let entry_a = make_entry(&path_a, "test_sort_a.txt");
+        let entry_b = make_entry(&path_b, "test_sort_b.log");
+
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+
+        // Name sorting
+        let mut opts = Options::default();
+        opts.sort = Sort::Name;
+        assert_eq!(compare_entries(&entry_a, &entry_b, &opts), Ordering::Less);
+
+        // Reverse sorting
+        opts.reverse = true;
+        assert_eq!(compare_entries(&entry_a, &entry_b, &opts), Ordering::Greater);
+        opts.reverse = false;
+
+        // Size sorting
+        opts.sort = Sort::Size;
+        assert_eq!(compare_entries(&entry_a, &entry_b, &opts), Ordering::Greater);
+
+        // Time sorting
+        opts.sort = Sort::Time;
+        assert_eq!(compare_entries(&entry_a, &entry_b, &opts), Ordering::Greater);
+
+        // Extension sorting
+        opts.sort = Sort::Extension;
+        assert_eq!(compare_entries(&entry_a, &entry_b, &opts), Ordering::Greater);
+
+        // None sorting
+        opts.sort = Sort::None;
+        assert_eq!(compare_entries(&entry_a, &entry_b, &opts), Ordering::Equal);
+    }
+
+    #[test]
+    fn test_group_dirs_first() {
+        let dir_entry = make_entry(Path::new("."), ".");
+        let file_entry = make_entry(Path::new("src/tools/ls.rs"), "ls.rs");
+        
+        let mut opts = Options::default();
+        opts.group_dirs_first = true;
+        
+        assert_eq!(compare_entries(&dir_entry, &file_entry, &opts), Ordering::Less);
+        assert_eq!(compare_entries(&file_entry, &dir_entry, &opts), Ordering::Greater);
+    }
+
+    #[test]
+    fn test_indicator_helper() {
+        let dir_entry = make_entry(Path::new("."), ".");
+        let file_entry = make_entry(Path::new("src/tools/ls.rs"), "ls.rs");
+
+        assert_eq!(indicator(&dir_entry, Indicator::None), None);
+        assert_eq!(indicator(&dir_entry, Indicator::Slash), Some(b'/'));
+        assert_eq!(indicator(&dir_entry, Indicator::FileType), Some(b'/'));
+        assert_eq!(indicator(&dir_entry, Indicator::Classify), Some(b'/'));
+
+        assert_eq!(indicator(&file_entry, Indicator::Slash), None);
+    }
+
+    #[test]
+    fn test_indicator_symlink() {
+        let temp_dir = std::env::temp_dir();
+        let link_path = temp_dir.join("test_link");
+        let target_path = temp_dir.join("test_target");
+        let _ = std::fs::remove_file(&link_path);
+        let _ = std::fs::remove_file(&target_path);
+        std::fs::write(&target_path, "").unwrap();
+        std::os::unix::fs::symlink(&target_path, &link_path).unwrap();
+
+        let entry = Entry {
+            display_name: OsString::from("test_link"),
+            display_path: PathBuf::from("test_link"),
+            path: link_path.clone(),
+            metadata: std::fs::symlink_metadata(&link_path).unwrap(),
+        };
+
+        assert_eq!(indicator(&entry, Indicator::FileType), Some(b'@'));
+        assert_eq!(indicator(&entry, Indicator::Classify), Some(b'@'));
+
+        let _ = std::fs::remove_file(&link_path);
+        let _ = std::fs::remove_file(&target_path);
+    }
+
+    #[test]
+    fn test_mode_string() {
+        let dir_metadata = fs::metadata(".").unwrap();
+        let mode_str = mode_string(&dir_metadata);
+        assert!(mode_str.starts_with('d'));
+
+        let file_metadata = fs::metadata("src/tools/ls.rs").unwrap();
+        let mode_str = mode_string(&file_metadata);
+        assert!(mode_str.starts_with('-'));
+    }
+
+    #[test]
+    fn test_blocks_display() {
+        let entry = make_entry(Path::new("src/tools/ls.rs"), "ls.rs");
+        let mut opts = Options::default();
+        opts.block_size = 1024;
+        let b = blocks(&entry, &opts);
+        
+        opts.human_readable = true;
+        let hb = display_blocks(&entry, &opts);
+        assert!(!hb.is_empty());
+        
+        opts.human_readable = false;
+        let nb = display_blocks(&entry, &opts);
+        assert_eq!(nb, b.to_string());
+    }
+
+    #[test]
+    fn test_humanize() {
+        assert_eq!(humanize(500, 1024), "500");
+        assert_eq!(humanize(1024, 1024), "1.0K");
+        assert_eq!(humanize(1024 * 1024, 1024), "1.0M");
+        assert_eq!(humanize(9 * 1024, 1024), "9.0K");
+        assert_eq!(humanize(10 * 1024, 1024), "10K");
+        assert_eq!(humanize(1024 * 1024 * 1024 * 1024 * 1024, 1024), "1.0P");
+    }
+
+    #[test]
+    fn test_display_time_before_epoch() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_epoch.txt");
+        let _ = std::fs::remove_file(&path);
+        let file = std::fs::File::create(&path).unwrap();
+        let time_before = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(10);
+        file.set_modified(time_before).unwrap();
+        drop(file);
+
+        let entry = Entry {
+            display_name: OsString::from("test_epoch.txt"),
+            display_path: PathBuf::from("test_epoch.txt"),
+            path: path.clone(),
+            metadata: std::fs::metadata(&path).unwrap(),
+        };
+        let mut opts = Options::default();
+        opts.time = TimeField::Modified;
+        let t_str = display_time(&entry, &opts);
+        assert_eq!(t_str, "-10");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_exec_char() {
+        assert_eq!(exec_char(0o100 | 0o4000, 0o100, 0o4000, 's', 'S'), 's');
+        assert_eq!(exec_char(0o4000, 0o100, 0o4000, 's', 'S'), 'S');
+        assert_eq!(exec_char(0o100, 0o100, 0o4000, 's', 'S'), 'x');
+        assert_eq!(exec_char(0, 0o100, 0o4000, 's', 'S'), '-');
+    }
+
+    #[test]
+    fn test_should_skip() {
+        let mut opts = Options::default();
+        assert!(should_skip(OsStr::new(".hidden"), &opts));
+        assert!(should_skip(OsStr::new("."), &opts));
+        assert!(should_skip(OsStr::new(".."), &opts));
+        assert!(!should_skip(OsStr::new("visible"), &opts));
+
+        opts.all = true;
+        assert!(!should_skip(OsStr::new(".hidden"), &opts));
+        assert!(!should_skip(OsStr::new("."), &opts));
+        assert!(!should_skip(OsStr::new(".."), &opts));
+
+        opts.all = false;
+        opts.almost_all = true;
+        assert!(!should_skip(OsStr::new(".hidden"), &opts));
+        assert!(should_skip(OsStr::new("."), &opts));
+        assert!(should_skip(OsStr::new(".."), &opts));
+
+        opts.almost_all = false;
+        opts.ignore_backups = true;
+        assert!(should_skip(OsStr::new("backup~"), &opts));
+        assert!(!should_skip(OsStr::new("backup"), &opts));
+    }
+
+    #[test]
+    fn test_resolve() {
+        let cwd = Path::new("/my/cwd");
+        assert_eq!(resolve(cwd, OsStr::new("foo")), PathBuf::from("/my/cwd/foo"));
+        assert_eq!(resolve(cwd, OsStr::new("/absolute/bar")), PathBuf::from("/absolute/bar"));
+    }
+
+    #[test]
+    fn test_recursive_loop() {
+        let temp_dir = std::env::temp_dir();
+        let parent_dir = temp_dir.join("test_loop_parent");
+        let _ = std::fs::remove_dir_all(&parent_dir);
+        std::fs::create_dir(&parent_dir).unwrap();
+
+        let link_path = parent_dir.join("loop_link");
+        std::os::unix::fs::symlink(&parent_dir, &link_path).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut opts = Options::default();
+        opts.recursive = true;
+        opts.dereference = true;
+
+        let dir_entry = make_entry(&parent_dir, "test_loop_parent");
+        let code = list_dir(&dir_entry, &opts, &mut stdout, &mut stderr);
+
+        let _ = std::fs::remove_file(&link_path);
+        let _ = std::fs::remove_dir(&parent_dir);
+
+        assert_eq!(code, 1);
+        let err_str = String::from_utf8_lossy(&stderr);
+        assert!(err_str.contains("is part of a loop"));
+    }
+
+    #[test]
+    fn test_list_dir_not_a_directory() {
+        let file_entry = make_entry(Path::new("src/tools/ls.rs"), "ls.rs");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let opts = Options::default();
+        let code = list_dir(&file_entry, &opts, &mut stdout, &mut stderr);
+        assert_eq!(code, 1);
+        let err_str = String::from_utf8_lossy(&stderr);
+        assert!(err_str.contains("cannot open directory"));
+    }
+
+    #[test]
+    fn test_write_entries_formats() {
+        let entry1 = make_entry(Path::new("src/tools/ls.rs"), "ls.rs");
+        let entries = vec![entry1];
+        let mut opts = Options::default();
+
+        opts.format = Format::One;
+        let mut stdout = Vec::new();
+        write_entries(&entries, &opts, &mut stdout);
+        assert_eq!(String::from_utf8_lossy(&stdout), "ls.rs\n");
+
+        opts.format = Format::Columns;
+        stdout.clear();
+        write_entries(&entries, &opts, &mut stdout);
+        assert_eq!(String::from_utf8_lossy(&stdout), "ls.rs\n");
+
+        opts.format = Format::Commas;
+        stdout.clear();
+        write_entries(&entries, &opts, &mut stdout);
+        assert_eq!(String::from_utf8_lossy(&stdout), "ls.rs\n");
+
+        opts.format = Format::Long;
+        stdout.clear();
+        write_entries(&entries, &opts, &mut stdout);
+        let long_str = String::from_utf8_lossy(&stdout);
+        assert!(long_str.contains("total"));
+        assert!(long_str.contains("ls.rs"));
+    }
+
+    #[test]
+    fn test_ls_run_help() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(&["--help"], Path::new("."), &mut stdout, &mut stderr);
+        assert_eq!(code, 0);
+        assert!(String::from_utf8_lossy(&stdout).contains("Usage: ls"));
+    }
+
+    #[test]
+    fn test_ls_run_version() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(&["--version"], Path::new("."), &mut stdout, &mut stderr);
+        assert_eq!(code, 0);
+        assert!(String::from_utf8_lossy(&stdout).contains("ls (rust-unix-tools)"));
+    }
+
+    #[test]
+    fn test_ls_run_invalid_option() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(&["--invalid-option-xyz"], Path::new("."), &mut stdout, &mut stderr);
+        assert_eq!(code, 2);
+        assert!(String::from_utf8_lossy(&stderr).contains("ls: unrecognized option"));
+    }
+
+    #[test]
+    fn test_ls_run_nonexistent_file() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(&["nonexistent_file_xyz"], Path::new("."), &mut stdout, &mut stderr);
+        assert_eq!(code, 2);
+        assert!(String::from_utf8_lossy(&stderr).contains("cannot access 'nonexistent_file_xyz'"));
+    }
 }

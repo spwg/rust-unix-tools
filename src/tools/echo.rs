@@ -266,7 +266,6 @@ If -e is in effect, the following sequences are recognized:
 mod tests {
     use super::*;
     use std::io::{self, Write};
-    use std::env;
 
     // Helper writer that can fail on demand
     struct MockWriter {

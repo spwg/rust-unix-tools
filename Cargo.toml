@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+regex = "1.10"
 
 [[bin]]
 name = "echo"
@@ -16,3 +17,7 @@ path = "src/bin/ls.rs"
 [[bin]]
 name = "cat"
 path = "src/bin/cat.rs"
+
+[[bin]]
+name = "grep"
+path = "src/bin/grep.rs"

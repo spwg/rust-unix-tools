@@ -770,7 +770,7 @@ fn traverse(
     options: &TraversalOptions,
     expr: &ExprNode,
     has_action: bool,
-    visited: &mut HashSet<PathBuf>,
+    visited: &mut HashSet<(u64, u64)>,
     exit_code: &mut i32,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -831,16 +831,8 @@ fn traverse(
 
     // Loop detection for directories
     if is_dir && !pruned {
-        let canonical = match fs::canonicalize(path) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = writeln!(stderr, "find: '{}': {}", display_path.to_string_lossy(), e);
-                *exit_code = 1;
-                return;
-            }
-        };
-
-        if !visited.insert(canonical.clone()) {
+        let key = (metadata.dev(), metadata.ino());
+        if !visited.insert(key) {
             let _ = writeln!(stderr, "find: File system loop detected; '{}' is part of the same file system loop.", display_path.to_string_lossy());
             *exit_code = 1;
             return;
@@ -888,7 +880,7 @@ fn traverse(
             );
         }
 
-        visited.remove(&canonical);
+        visited.remove(&key);
     }
 
     // Post-order evaluation
